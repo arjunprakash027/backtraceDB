@@ -17,9 +17,9 @@ type Column struct {
 }
 
 type Schema struct {
-	Name string
+	Name       string
 	TimeColumn string
-	Columns []Column
+	Columns    []Column
 }
 
 func (s Schema) Validate() error {
@@ -35,12 +35,11 @@ func (s Schema) Validate() error {
 	columnNames := make(map[string]struct{})
 	timeColumnFound := false
 
-
 	for _, col := range s.Columns {
 		if col.Name == "" {
 			return fmt.Errorf("column name cannot be empty")
 		}
-		
+
 		if _, ok := columnNames[col.Name]; ok {
 			return fmt.Errorf("Duplicate column name %s is not allowed", col.Name)
 		}
