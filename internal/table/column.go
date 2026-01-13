@@ -2,6 +2,7 @@ package table
 
 import (
 	"backtraceDB/internal/schema"
+	"fmt"
 )
 
 type ColumnLocation struct {
@@ -49,6 +50,6 @@ func NewColumnStorage(colTypes []schema.ColumnType) (*ColumnStorage, []ColumnLoc
 		}
 
 	}
-	
-	return storage, nil, nil
+
+	return storage, location, nil
 }
