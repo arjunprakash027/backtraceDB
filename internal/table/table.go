@@ -1,3 +1,4 @@
+// possible optimizations
 package table
 
 import (
