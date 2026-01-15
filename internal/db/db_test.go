@@ -7,7 +7,7 @@ import (
 
 func TestDBWorkFlow(t *testing.T) {
 	// 1. Open DB
-	database, err := Open()
+	database, err := Open("test")
 	if err != nil {
 		t.Fatalf("Failed to open DB: %v", err)
 	}

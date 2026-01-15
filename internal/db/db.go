@@ -9,11 +9,13 @@ import (
 
 type DB struct {
 	mu sync.RWMutex
+	name string
 	tables map[string]*table.Table
 }
 
-func Open() (*DB, error) {
+func Open(name string) (*DB, error) {
 	return &DB{
+		name: name,
 		tables: make(map[string]*table.Table),
 	}, nil
 }

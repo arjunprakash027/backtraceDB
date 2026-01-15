@@ -2,7 +2,7 @@ package backtracedb
 
 import (
 	"backtraceDB/internal/schema"
-	"backtraceDB/internal/table"
+	"backtraceDB/internal/db"
 	"math/rand"
 	"testing"
 )
@@ -46,10 +46,23 @@ func BenchmarkCreation(b *testing.B) {
 				{Name: "volume", Type: schema.Int64},
 			},
 		}
-		tbl, _ := table.CreateTable(s)
+
+		database, err := db.Open("test")
+		if err != nil {
+			b.Fatal(err)
+		}
+
+		tbl, err := database.CreateTable(s)
+		if err != nil {
+			b.Fatal(err)
+		}
 
 		for _, row := range stockData {
-			tbl.AppendRow(row)
+			if err := tbl.AppendRow(row); err != nil {
+				b.Fatal(err)
+			}
 		}
+
 	}
 }
+
