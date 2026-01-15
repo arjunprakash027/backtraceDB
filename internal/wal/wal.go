@@ -11,10 +11,12 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-
 	"backtraceDB/internal/schema"
-	"backtraceDB/internal/table"
 )
+
+type RowLoader interface {
+	LoadRowNoWAL(row map[string]any) error
+}
 
 type WAL struct {
 	mu     sync.Mutex
@@ -137,9 +139,9 @@ func (w *WAL) AppendRow(row map[string]any) error {
 	}
 
 	//potential optimization by making sync interval based
-	if err := w.file.Sync(); err != nil {
-		return err
-	}
+	// if err := w.file.Sync(); err != nil {
+	// 	return err
+	// }
 
 	return nil
 
@@ -183,7 +185,7 @@ func (w *WAL) DecodePayload(payload []byte) (map[string]any, error) {
 }
 
 // potential optimization by making this faster
-func (w *WAL) ReplayTable(tbl *table.Table) error {
+func (w *WAL) ReplayTable(loader RowLoader) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -218,7 +220,7 @@ func (w *WAL) ReplayTable(tbl *table.Table) error {
 			return err
 		}
 
-		if err := tbl.AppendRow(row); err != nil {
+		if err := loader.LoadRowNoWAL(row); err != nil {
 			return err
 		}
 

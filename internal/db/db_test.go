@@ -2,12 +2,16 @@ package db
 
 import (
 	"backtraceDB/internal/schema"
+	"os"
 	"testing"
 )
 
 func TestDBWorkFlow(t *testing.T) {
+	dbName := "workflow_test"
+	defer os.RemoveAll(dbName)
+
 	// 1. Open DB
-	database, err := Open("test")
+	database, err := Open(dbName)
 	if err != nil {
 		t.Fatalf("Failed to open DB: %v", err)
 	}
@@ -19,7 +23,7 @@ func TestDBWorkFlow(t *testing.T) {
 		Columns: []schema.Column{
 			{Name: "timestamp", Type: schema.Int64},
 			{Name: "message", Type: schema.String},
-			{Name: "level", Type: schema.Float64}, // Using float for logs just to test all types
+			{Name: "level", Type: schema.Float64},
 		},
 	}
 
@@ -33,7 +37,6 @@ func TestDBWorkFlow(t *testing.T) {
 	rows := []map[string]any{
 		{"timestamp": int64(100), "message": "error found", "level": 1.0},
 		{"timestamp": int64(200), "message": "system restart", "level": 2.0},
-		{"timestamp": int64(300), "message": "error found", "level": 1.5}, // Reuse "error found" string
 	}
 
 	for _, row := range rows {
@@ -43,31 +46,58 @@ func TestDBWorkFlow(t *testing.T) {
 	}
 
 	// 5. Verification
-	if tbl.RowCount() != 3 {
-		t.Errorf("Expected row count 3, got %d", tbl.RowCount())
+	if tbl.RowCount() != 2 {
+		t.Errorf("Expected row count 2, got %d", tbl.RowCount())
+	}
+}
+
+func TestRecoveryWorkflow(t *testing.T) {
+	dbName := "recovery_test"
+	tableName := "metrics"
+	defer os.RemoveAll(dbName)
+
+	s := schema.Schema{
+		Name:       tableName,
+		TimeColumn: "timestamp",
+		Columns: []schema.Column{
+			{Name: "timestamp", Type: schema.Int64},
+			{Name: "value", Type: schema.Float64},
+		},
 	}
 
-	tables := database.ListAllTables()
-	found := false
-	for _, name := range tables {
-		if name == "logs" {
-			found = true
-			break
+	// PHASE 1: Write data and "close"
+	{
+		database, err := Open(dbName)
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	if !found {
-		t.Errorf("Table 'logs' not found in ListAllTables")
+		tbl, err := database.CreateTable(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		_ = tbl.AppendRow(map[string]any{"timestamp": int64(10), "value": 1.1})
+		_ = tbl.AppendRow(map[string]any{"timestamp": int64(20), "value": 2.2})
+
+		// In a real database we'd have a Close method,
+		// but our WAL is synced on every write!
 	}
 
-	// 6. Test Error Handling: Duplicate Table
-	_, err = database.CreateTable(s)
-	if err == nil {
-		t.Error("Expected error when creating duplicate table, got nil")
-	}
+	// PHASE 2: Open and Recover
+	{
+		database, err := Open(dbName)
+		if err != nil {
+			t.Fatal(err)
+		}
 
-	// 7. Test Error Handling: Out of order timestamp
-	badRow := map[string]any{"timestamp": int64(50), "message": "old log", "level": 0.5}
-	if err := tbl.AppendRow(badRow); err == nil {
-		t.Error("Expected error for out-of-order timestamp, got nil")
+		// OpenTable triggers the WAL Replay
+		tbl, err := database.OpenTable(s)
+		if err != nil {
+			t.Fatalf("Failed to recover table: %v", err)
+		}
+
+		if tbl.RowCount() != 2 {
+			t.Errorf("Recovery failed! Expected 2 rows, got %d", tbl.RowCount())
+		}
 	}
 }

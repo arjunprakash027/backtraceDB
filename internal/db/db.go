@@ -1,10 +1,12 @@
 package db
 
 import (
+	"backtraceDB/internal/schema"
+	"backtraceDB/internal/table"
+	"backtraceDB/internal/wal"
+	"path/filepath"
 	"fmt"
 	"sync"
-	"backtraceDB/internal/table"
-	"backtraceDB/internal/schema"
 )
 
 type DB struct {
@@ -29,9 +31,46 @@ func (db *DB) CreateTable(s schema.Schema) (*table.Table, error) {
 		return nil, fmt.Errorf("table %s already exists", s.Name)
 	}
 
-	t, err := table.CreateTable(s)
+	tablePath := filepath.Join(db.name, s.Name)
+	walPath := filepath.Join(tablePath, "wal")
+	wal, err := wal.NewWAL(walPath, s)
+
 	if err != nil {
 		return nil, err
+	}
+	t, err := table.CreateTable(s, wal)
+	if err != nil {
+		return nil, err
+	}
+
+	db.tables[s.Name] = t
+	return t, nil
+}
+
+func (db *DB) OpenTable(s schema.Schema) (*table.Table, error) {
+	
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	if tbl, ok := db.tables[s.Name]; ok {
+		return tbl, nil
+	}
+
+	tablePath := filepath.Join(db.name, s.Name)
+	walPath := filepath.Join(tablePath, "wal")
+
+	wal, err := wal.NewWAL(walPath, s)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open WAL: %v", err)
+	}
+
+	t, err := table.CreateTable(s, wal)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create table: %v", err)
+	}
+
+	if err := wal.ReplayTable(t); err != nil {
+		return nil, fmt.Errorf("failed to replay WAL: %v", err)
 	}
 
 	db.tables[s.Name] = t

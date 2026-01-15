@@ -1,1 +1,1 @@
-go test -bench=BenchmarkCreation -benchmem
+go test -bench=. -benchmem
