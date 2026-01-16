@@ -15,6 +15,7 @@ type ColumnStorage struct {
 	Float64Cols [][]float64
 	StringCols  [][]int
 	StringDicts []map[string]int
+	StringReads [][]string //to make reads faster
 }
 
 func NewColumnStorage(colTypes []schema.ColumnType) (*ColumnStorage, []ColumnLocation, error) {
@@ -42,6 +43,7 @@ func NewColumnStorage(colTypes []schema.ColumnType) (*ColumnStorage, []ColumnLoc
 		case schema.String:
 			storage.StringCols = append(storage.StringCols, []int{})
 			storage.StringDicts = append(storage.StringDicts, map[string]int{})
+			storage.StringReads = append(storage.StringReads, []string{})
 			location[i] = ColumnLocation{Type: t, Index: stringIdx}
 			stringIdx++
 		

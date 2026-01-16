@@ -17,6 +17,65 @@ type Table struct {
 	wal        *wal.WAL
 }
 
+type TableReader struct {
+	table *Table
+	cursor int
+}
+
+func (t *Table) Reader() *TableReader {
+	return &TableReader{
+		table: t,
+		cursor: 0,
+	}
+}
+
+func (tr *TableReader) Next() (map[string]any, bool) {
+
+	if tr.cursor >= tr.table.rowCount {
+		return nil, false
+	}
+
+	row := make(map[string]any)
+	t := tr.table
+
+	for logicalIdx, col := range t.schema.Columns {
+		loc := t.locations[logicalIdx]
+
+		switch loc.Type {
+		case schema.Int64:
+			row[col.Name] = t.storage.Int64Cols[loc.Index][tr.cursor]
+		case schema.Float64:
+			row[col.Name] = t.storage.Float64Cols[loc.Index][tr.cursor]
+		case schema.String:
+			strID := t.storage.StringCols[loc.Index][tr.cursor]
+			row[col.Name] = t.storage.StringReads[loc.Index][strID]
+		}
+	}
+
+	tr.cursor++
+
+	return row, true
+
+}
+
+func (tr *TableReader) ReadColumn(colName string) (any, error) { //we are not returning string column data for now
+
+	for i, col := range tr.table.schema.Columns {
+		if col.Name == colName {
+			loc := tr.table.locations[i]
+
+			switch col.Type {
+			case schema.Int64:
+				return tr.table.storage.Int64Cols[loc.Index], nil
+			case schema.Float64:
+				return tr.table.storage.Float64Cols[loc.Index], nil
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("column %s not found", colName)
+}
+
 func CreateTable(s schema.Schema, w *wal.WAL) (*Table, error) {
 
 	if err := s.Validate(); err != nil {
@@ -110,6 +169,7 @@ func (t *Table) AppendHelper(row map[string]any) error {
 				if !exists {
 					id = len(dict)
 					dict[v] = id
+					t.storage.StringReads[loc.Index] = append(t.storage.StringReads[loc.Index], v)
 				}
 				t.storage.StringCols[loc.Index] = append(t.storage.StringCols[loc.Index], id)
 
