@@ -20,6 +20,7 @@ type Table struct {
 type TableReader struct {
 	table *Table
 	cursor int
+	mask []bool
 }
 
 func (t *Table) Reader() *TableReader {
@@ -30,6 +31,10 @@ func (t *Table) Reader() *TableReader {
 }
 
 func (tr *TableReader) Next() (map[string]any, bool) {
+
+	for tr.cursor < tr.table.rowCount && tr.mask != nil && !tr.mask[tr.cursor] {
+		tr.cursor++
+	}
 
 	if tr.cursor >= tr.table.rowCount {
 		return nil, false
@@ -74,6 +79,72 @@ func (tr *TableReader) ReadColumn(colName string) (any, error) { //we are not re
 	}
 
 	return nil, fmt.Errorf("column %s not found", colName)
+}
+
+func (tr *TableReader) evalInt64(a int64, op string, b int64) bool {
+	switch op {
+	case "==": return a == b
+	case ">":  return a > b
+	case "<":  return a < b
+	case ">=": return a >= b
+	case "<=": return a <= b
+	case "!=": return a != b
+	}
+	return false
+}
+func (tr *TableReader) evalFloat64(a float64, op string, b float64) bool {
+    switch op {
+    case "==": return a == b
+	case ">":  return a > b
+	case "<":  return a < b
+	case ">=": return a >= b
+	case "<=": return a <= b
+	case "!=": return a != b
+    }
+    return false
+}
+
+func (tr *TableReader) Filter(colName string, op string, value any) *TableReader {
+
+	if tr.mask == nil {
+		tr.mask = make([]bool, tr.table.rowCount)
+		for i := range tr.mask {
+			tr.mask[i] = true
+		}
+	}
+
+	switch targetVal := value.(type) {
+	case int64:
+		Col, err := tr.ReadColumn(colName)
+		if err != nil {
+			return tr
+		}
+
+		slice := Col.([]int64)
+
+		for i, v := range slice {
+			if !tr.evalInt64(v, op, targetVal){
+				tr.mask[i] = false
+			}
+		}
+		
+	case float64:
+		Col, err := tr.ReadColumn(colName)
+		if err != nil {
+			return tr
+		}
+
+		slice := Col.([]float64)
+
+		for i, v := range slice {
+			if !tr.evalFloat64(v, op, targetVal){
+				tr.mask[i] = false
+			}
+		}
+			
+	}
+
+	return tr
 }
 
 func CreateTable(s schema.Schema, w *wal.WAL) (*Table, error) {

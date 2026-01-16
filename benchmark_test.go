@@ -1,11 +1,11 @@
 package backtracedb
 
 import (
-	"backtraceDB/internal/schema"
 	"backtraceDB/internal/db"
+	"backtraceDB/internal/schema"
 	"math/rand"
-	"testing"
 	"os"
+	"testing"
 )
 
 func generateStockData(count int) []map[string]any {
@@ -27,7 +27,7 @@ func generateStockData(count int) []map[string]any {
 }
 
 func SetupTableforBenchmark(count int) (*db.DB, schema.Schema, error) {
-	
+
 	dbName := "benchmark_test_db"
 	os.RemoveAll(dbName)
 
@@ -63,7 +63,7 @@ func SetupTableforBenchmark(count int) (*db.DB, schema.Schema, error) {
 	}
 
 	return database, s, nil
-	
+
 }
 
 func BenchmarkCreationWithWal(b *testing.B) {
@@ -101,7 +101,7 @@ func BenchmarkCreationWithWal(b *testing.B) {
 		opts := &db.CreateTableOptions{
 			EnableWal: true,
 		}
-	
+
 		tbl, err := database.CreateTable(s, opts)
 		if err != nil {
 			b.Fatal(err)
@@ -166,13 +166,13 @@ func BenchmarkCreationWithoutWal(b *testing.B) {
 	}
 }
 func BenchmarkWalReplay(b *testing.B) {
-	
+
 	rowCount := 100_000
 	_, s, err := SetupTableforBenchmark(rowCount)
 	b.SetBytes(int64(rowCount))
 
 	defer os.RemoveAll("benchmark_test_db")
-	 
+
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -191,7 +191,6 @@ func BenchmarkWalReplay(b *testing.B) {
 		}
 	}
 
-
 }
 
 func BenchmarkRetreivalSpeed(b *testing.B) {
@@ -202,15 +201,15 @@ func BenchmarkRetreivalSpeed(b *testing.B) {
 	b.SetBytes(int64(rowCount))
 
 	s := schema.Schema{
-			Name:       "Testing",
-			TimeColumn: "timestamp",
-			Columns: []schema.Column{
-				{Name: "timestamp", Type: schema.Int64},
-				{Name: "symbol", Type: schema.String},
-				{Name: "price", Type: schema.Float64},
-				{Name: "volume", Type: schema.Int64},
-			},
-		}
+		Name:       "Testing",
+		TimeColumn: "timestamp",
+		Columns: []schema.Column{
+			{Name: "timestamp", Type: schema.Int64},
+			{Name: "symbol", Type: schema.String},
+			{Name: "price", Type: schema.Float64},
+			{Name: "volume", Type: schema.Int64},
+		},
+	}
 
 	database, err := db.Open("benchmark_test_db")
 	if err != nil {
@@ -250,3 +249,93 @@ func BenchmarkRetreivalSpeed(b *testing.B) {
 	}
 }
 
+func BenchmarkRetreivalSpeedWithFilter(b *testing.B) {
+
+	rowCount := 100_000
+	stockData := generateStockData(rowCount)
+
+	b.SetBytes(int64(rowCount))
+
+	s := schema.Schema{
+		Name:       "Testing",
+		TimeColumn: "timestamp",
+		Columns: []schema.Column{
+			{Name: "timestamp", Type: schema.Int64},
+			{Name: "symbol", Type: schema.String},
+			{Name: "price", Type: schema.Float64},
+			{Name: "volume", Type: schema.Int64},
+		},
+	}
+
+	database, err := db.Open("benchmark_test_db")
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	opts := &db.CreateTableOptions{
+		EnableWal: false,
+	}
+
+	tbl, err := database.CreateTable(s, opts)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	for _, row := range stockData {
+		if err := tbl.AppendRow(row); err != nil {
+			b.Fatal(err)
+		}
+	}
+
+	b.ResetTimer()
+
+	b.Run("Filter-On-Volume-Int", func(b *testing.B) {
+		b.SetBytes(int64(rowCount))
+		for i := 0; i < b.N; i++ {
+			r := tbl.Reader().Filter("volume", "<=", int64(1000))
+			for {
+				if _, ok := r.Next(); !ok {
+					break
+				}
+			}
+		}
+	})
+
+	b.Run("Filter-On-Price-Float", func(b *testing.B) {
+		b.SetBytes(int64(rowCount))
+		for i := 0; i < b.N; i++ {
+			r := tbl.Reader().Filter("price", ">", 50.5)
+			for {
+				if _, ok := r.Next(); !ok {
+					break
+				}
+			}
+		}
+	})
+
+	b.Run("Chained-Volume-AND-Price", func(b *testing.B) {
+		b.SetBytes(int64(rowCount))
+		for i := 0; i < b.N; i++ {
+			r := tbl.Reader().
+				Filter("volume", "<=", int64(5000)).
+				Filter("price", ">", 10.0)
+			for {
+				if _, ok := r.Next(); !ok {
+					break
+				}
+			}
+		}
+	})
+
+	b.Run("High-Selectivity-Match-Nothing", func(b *testing.B) {
+		b.SetBytes(int64(rowCount))
+		for i := 0; i < b.N; i++ {
+			r := tbl.Reader().Filter("volume", "<", int64(0)) // Matches 0 rows
+			for {
+				if _, ok := r.Next(); !ok {
+					break
+				}
+			}
+		}
+	})
+}
