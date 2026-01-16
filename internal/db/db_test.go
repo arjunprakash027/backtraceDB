@@ -28,7 +28,10 @@ func TestDBWorkFlow(t *testing.T) {
 	}
 
 	// 3. Create Table
-	tbl, err := database.CreateTable(s)
+
+	opts := &CreateTableOptions{}
+
+	tbl, err := database.CreateTable(s, opts)
 	if err != nil {
 		t.Fatalf("Failed to create table: %v", err)
 	}
@@ -71,7 +74,12 @@ func TestRecoveryWorkflow(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		tbl, err := database.CreateTable(s)
+
+		opts := &CreateTableOptions{
+			EnableWal: true,
+		}
+
+		tbl, err := database.CreateTable(s, opts)
 		if err != nil {
 			t.Fatal(err)
 		}

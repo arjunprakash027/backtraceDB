@@ -47,7 +47,11 @@ func SetupTableforBenchmark(count int) (*db.DB, schema.Schema, error) {
 		},
 	}
 
-	tbl, err := database.CreateTable(s)
+	opts := &db.CreateTableOptions{
+		EnableWal: true,
+	}
+
+	tbl, err := database.CreateTable(s, opts)
 	if err != nil {
 		return nil, schema.Schema{}, err
 	}
@@ -62,7 +66,7 @@ func SetupTableforBenchmark(count int) (*db.DB, schema.Schema, error) {
 	
 }
 
-func BenchmarkCreation(b *testing.B) {
+func BenchmarkCreationWithWal(b *testing.B) {
 
 	rowCount := 100_000
 	stockData := generateStockData(rowCount)
@@ -94,7 +98,11 @@ func BenchmarkCreation(b *testing.B) {
 			b.Fatal(err)
 		}
 
-		tbl, err := database.CreateTable(s)
+		opts := &db.CreateTableOptions{
+			EnableWal: true,
+		}
+	
+		tbl, err := database.CreateTable(s, opts)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -108,12 +116,61 @@ func BenchmarkCreation(b *testing.B) {
 	}
 }
 
+func BenchmarkCreationWithoutWal(b *testing.B) {
+
+	rowCount := 100_000
+	stockData := generateStockData(rowCount)
+
+	b.SetBytes(int64(rowCount))
+
+	defer os.RemoveAll("benchmark_test_db")
+
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+
+		b.StartTimer()
+
+		s := schema.Schema{
+			Name:       "Testing",
+			TimeColumn: "timestamp",
+			Columns: []schema.Column{
+				{Name: "timestamp", Type: schema.Int64},
+				{Name: "symbol", Type: schema.String},
+				{Name: "price", Type: schema.Float64},
+				{Name: "volume", Type: schema.Int64},
+			},
+		}
+
+		database, err := db.Open("benchmark_test_db")
+		if err != nil {
+			b.Fatal(err)
+		}
+
+		opts := &db.CreateTableOptions{
+			EnableWal: false,
+		}
+		
+		tbl, err := database.CreateTable(s, opts)
+		if err != nil {
+			b.Fatal(err)
+		}
+
+		for _, row := range stockData {
+			if err := tbl.AppendRow(row); err != nil {
+				b.Fatal(err)
+			}
+		}
+
+	}
+}
 func BenchmarkWalReplay(b *testing.B) {
 	
 	rowCount := 100_000
 	_, s, err := SetupTableforBenchmark(rowCount)
 	b.SetBytes(int64(rowCount))
-	
+
 	defer os.RemoveAll("benchmark_test_db")
 	 
 	if err != nil {

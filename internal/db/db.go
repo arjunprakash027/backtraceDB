@@ -15,6 +15,10 @@ type DB struct {
 	tables map[string]*table.Table
 }
 
+type CreateTableOptions struct { //options while creating a table, simple for now, will add as database improves with more options
+	EnableWal bool
+}
+
 func Open(name string) (*DB, error) {
 	return &DB{
 		name: name,
@@ -22,7 +26,7 @@ func Open(name string) (*DB, error) {
 	}, nil
 }
 
-func (db *DB) CreateTable(s schema.Schema) (*table.Table, error) {
+func (db *DB) CreateTable(s schema.Schema, opts *CreateTableOptions) (*table.Table, error) {
 
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -31,14 +35,19 @@ func (db *DB) CreateTable(s schema.Schema) (*table.Table, error) {
 		return nil, fmt.Errorf("table %s already exists", s.Name)
 	}
 
-	tablePath := filepath.Join(db.name, s.Name)
-	walPath := filepath.Join(tablePath, "wal")
-	wal, err := wal.NewWAL(walPath, s)
+	var w *wal.WAL
 
-	if err != nil {
-		return nil, err
+	if opts.EnableWal {
+		tablePath := filepath.Join(db.name, s.Name)
+		walPath := filepath.Join(tablePath, "wal")
+		var err error
+		w, err = wal.NewWAL(walPath, s)
+		if err != nil {
+			return nil, err
+		}
 	}
-	t, err := table.CreateTable(s, wal)
+	
+	t, err := table.CreateTable(s, w)
 	if err != nil {
 		return nil, err
 	}
