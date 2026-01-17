@@ -5,6 +5,7 @@ import (
 	"backtraceDB/internal/schema"
 	"backtraceDB/internal/wal"
 	"fmt"
+	"sort"
 )
 
 type Table struct {
@@ -20,6 +21,7 @@ type Table struct {
 type TableReader struct {
 	table *Table
 	cursor int
+	endIdx int
 	mask []bool
 }
 
@@ -27,16 +29,17 @@ func (t *Table) Reader() *TableReader {
 	return &TableReader{
 		table: t,
 		cursor: 0,
+		endIdx: t.rowCount,
 	}
 }
 
 func (tr *TableReader) Next() (map[string]any, bool) {
 
-	for tr.cursor < tr.table.rowCount && tr.mask != nil && !tr.mask[tr.cursor] {
+	for tr.cursor < tr.endIdx && tr.mask != nil && !tr.mask[tr.cursor] {
 		tr.cursor++
 	}
 
-	if tr.cursor >= tr.table.rowCount {
+	if tr.cursor >= tr.endIdx {
 		return nil, false
 	}
 
@@ -111,6 +114,67 @@ func (tr *TableReader) Filter(colName string, op string, value any) *TableReader
 		for i := range tr.mask {
 			tr.mask[i] = true
 		}
+	}
+
+	if colName == tr.table.schema.TimeColumn {
+		Col, err := tr.ReadColumn(colName)
+		if err != nil {
+			return tr
+		}
+		slice := Col.([]int64)
+		targetTs := value.(int64)
+
+		// first idx where slice is equal to target and increasing 
+		idx := sort.Search(len(slice), func(i int) bool {
+			return slice[i] >= targetTs
+		})
+		
+		// first idx where slice is greater than target and increasing
+		upperIdx := sort.Search(len(slice), func(i int) bool {
+			return slice[i] > targetTs
+		})
+		
+		if op == "==" {
+
+			if idx > tr.cursor { tr.cursor = idx }
+			if upperIdx < tr.endIdx { tr.endIdx = upperIdx }
+
+			for i := 0; i < idx; i++ { tr.mask[i] = false }
+			for i := upperIdx; i < len(slice); i++ { tr.mask[i] = false }
+
+		} else if op == "!=" {
+			for i := idx; i < upperIdx; i++ {
+				tr.mask[i] = false
+			}
+
+		} else if op == ">" {
+
+			if upperIdx > tr.cursor { tr.cursor = upperIdx }
+			for i := 0; i < upperIdx; i++ {
+				tr.mask[i] = false
+			}
+		} else if op == ">=" {
+
+			if idx > tr.cursor { tr.cursor = idx }
+			for i := 0; i < idx; i++ {
+				tr.mask[i] = false
+			}
+		} else if op == "<" {
+
+			if idx < tr.endIdx { tr.endIdx = idx }
+			for i := idx; i < len(slice); i++ {
+				tr.mask[i] = false
+			}
+		} else if op == "<=" {
+
+			if upperIdx < tr.endIdx { tr.endIdx = upperIdx }
+			for i := upperIdx; i < len(slice); i++ {
+				tr.mask[i] = false
+			}
+		}
+
+		return tr
+
 	}
 
 	switch targetVal := value.(type) {

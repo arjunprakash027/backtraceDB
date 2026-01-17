@@ -342,7 +342,7 @@ func BenchmarkRetreivalSpeedWithFilter(b *testing.B) {
 	b.Run("TimeFilter", func(b *testing.B) {
 		b.SetBytes(int64(rowCount))
 		for i := 0; i < b.N; i++ {
-			r := tbl.Reader().Filter("timestamp", "<", int64(1673628000000 + 50000))
+			r := tbl.Reader().Filter("timestamp", "<", int64(1673628000000 + 50_000))
 			for {
 				if _, ok := r.Next(); !ok {
 					break
