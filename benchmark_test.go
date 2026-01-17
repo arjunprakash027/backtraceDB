@@ -301,6 +301,18 @@ func BenchmarkRetreivalSpeedWithFilter(b *testing.B) {
 		}
 	})
 
+	b.Run("Filter-On-String", func(b *testing.B) {
+		b.SetBytes(int64(rowCount))
+		for i := 0; i < b.N; i++ {
+			r := tbl.Reader().Filter("symbol", "==", "AAPL")
+			for {
+				if _, ok := r.Next(); !ok {
+					break
+				}
+			}
+		}
+	})
+
 	b.Run("Filter-On-Price-Float", func(b *testing.B) {
 		b.SetBytes(int64(rowCount))
 		for i := 0; i < b.N; i++ {
