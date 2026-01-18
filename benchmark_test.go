@@ -94,6 +94,7 @@ func BenchmarkCreationWithWal(b *testing.B) {
 		}
 
 		database, err := db.Open("benchmark_test_db")
+		defer database.Close()
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -144,6 +145,7 @@ func BenchmarkCreationWithoutWal(b *testing.B) {
 		}
 
 		database, err := db.Open("benchmark_test_db")
+		defer database.Close()
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -183,6 +185,7 @@ func BenchmarkWalReplay(b *testing.B) {
 		b.StopTimer()
 
 		database, _ := db.Open("benchmark_test_db")
+		defer database.Close()
 		b.StartTimer()
 
 		_, err := database.OpenTable(s)
@@ -212,6 +215,7 @@ func BenchmarkRetreivalSpeed(b *testing.B) {
 	}
 
 	database, err := db.Open("benchmark_test_db")
+	defer database.Close()
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -268,6 +272,7 @@ func BenchmarkRetreivalSpeedWithFilter(b *testing.B) {
 	}
 
 	database, err := db.Open("benchmark_test_db")
+	defer database.Close()
 	if err != nil {
 		b.Fatal(err)
 	}
