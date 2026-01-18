@@ -4,8 +4,9 @@ import (
 	"backtraceDB/internal/schema"
 	"backtraceDB/internal/table"
 	"backtraceDB/internal/wal"
-	"path/filepath"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 )
 
@@ -106,4 +107,8 @@ func (db *DB) ListAllTables() []string {
 		names = append(names, name)
 	}
 	return names
+}
+
+func (db *DB) Close() error {
+	return os.RemoveAll("data_internal")
 }

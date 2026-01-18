@@ -1,1 +1,1 @@
-go test -bench=. -benchmem
+go test -bench=. -benchmem -run=^$

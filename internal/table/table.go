@@ -8,9 +8,12 @@ import (
 	"sort"
 )
 
+const MAX_BLOCK_SIZE = 100000
+
 type Table struct {
 	schema     schema.Schema
-	storage    *ColumnStorage
+	activeBlock *Block
+	coldBlocks []*Block
 	locations  []ColumnLocation
 	timeColIdx int
 	lastTs     int
@@ -51,12 +54,12 @@ func (tr *TableReader) Next() (map[string]any, bool) {
 
 		switch loc.Type {
 		case schema.Int64:
-			row[col.Name] = t.storage.Int64Cols[loc.Index][tr.cursor]
+			row[col.Name] = t.activeBlock.Storage.Int64Cols[loc.Index][tr.cursor]
 		case schema.Float64:
-			row[col.Name] = t.storage.Float64Cols[loc.Index][tr.cursor]
+			row[col.Name] = t.activeBlock.Storage.Float64Cols[loc.Index][tr.cursor]
 		case schema.String:
-			strID := t.storage.StringCols[loc.Index][tr.cursor]
-			row[col.Name] = t.storage.StringReads[loc.Index][strID]
+			strID := t.activeBlock.Storage.StringCols[loc.Index][tr.cursor]
+			row[col.Name] = t.activeBlock.Storage.StringReads[loc.Index][strID]
 		}
 	}
 
@@ -74,9 +77,9 @@ func (tr *TableReader) ReadColumn(colName string) (any, error) { //we are not re
 
 			switch col.Type {
 			case schema.Int64:
-				return tr.table.storage.Int64Cols[loc.Index], nil
+				return tr.table.activeBlock.Storage.Int64Cols[loc.Index], nil
 			case schema.Float64:
-				return tr.table.storage.Float64Cols[loc.Index], nil
+				return tr.table.activeBlock.Storage.Float64Cols[loc.Index], nil
 			}
 		}
 	}
@@ -254,8 +257,8 @@ func (tr *TableReader) Filter(colName string, op string, value any) *TableReader
 						if !tr.mask[j] {
 							continue
 						}
-						strID := tr.table.storage.StringCols[loc.Index][j]
-						val := tr.table.storage.StringReads[loc.Index][strID]
+						strID := tr.table.activeBlock.Storage.StringCols[loc.Index][j]
+						val := tr.table.activeBlock.Storage.StringReads[loc.Index][strID]
 						if !tr.evalString(val, op, targetVal) {
 							tr.mask[j] = false
 						}
@@ -268,7 +271,6 @@ func (tr *TableReader) Filter(colName string, op string, value any) *TableReader
 
 	return tr
 }
-
 func CreateTable(s schema.Schema, w *wal.WAL) (*Table, error) {
 
 	if err := s.Validate(); err != nil {
@@ -290,14 +292,15 @@ func CreateTable(s schema.Schema, w *wal.WAL) (*Table, error) {
 		return nil, fmt.Errorf("time column %s not found", s.TimeColumn)
 	}
 
-	storage, locations, err := NewColumnStorage(colTypes)
+	block, locations, err := NewBlock(colTypes)
 	if err != nil {
 		return nil, err
 	}
 
 	return &Table{
 		schema:     s,
-		storage:    storage,
+		activeBlock: block,
+		coldBlocks: []*Block{},
 		locations:  locations,
 		timeColIdx: timeIdx,
 		lastTs:     -1,
@@ -307,6 +310,8 @@ func CreateTable(s schema.Schema, w *wal.WAL) (*Table, error) {
 }
 
 func (t *Table) AppendHelper(row map[string]any) error {
+
+	
 	if len(row) != len(t.schema.Columns) {
 		return fmt.Errorf("row must have %d columns, got %d", len(t.schema.Columns), len(row))
 	}
@@ -342,14 +347,14 @@ func (t *Table) AppendHelper(row map[string]any) error {
 			if !ok {
 				return fmt.Errorf("column %s must be of type int64", col.Name)
 			}
-			t.storage.Int64Cols[loc.Index] = append(t.storage.Int64Cols[loc.Index], v)
+			t.activeBlock.Storage.Int64Cols[loc.Index] = append(t.activeBlock.Storage.Int64Cols[loc.Index], v)
 
 		case schema.Float64:
 			v, ok := val.(float64)
 			if !ok {
 				return fmt.Errorf("column %s must be of type float64", col.Name)
 			}
-			t.storage.Float64Cols[loc.Index] = append(t.storage.Float64Cols[loc.Index], v)
+			t.activeBlock.Storage.Float64Cols[loc.Index] = append(t.activeBlock.Storage.Float64Cols[loc.Index], v)
 
 		case schema.String:
 			v, ok := val.(string)
@@ -357,22 +362,41 @@ func (t *Table) AppendHelper(row map[string]any) error {
 				return fmt.Errorf("column %s must be of type string", col.Name)
 			}
 
-			dict := t.storage.StringDicts[loc.Index]
+			dict := t.activeBlock.Storage.StringDicts[loc.Index]
 			id, exists := dict[v]
 			if !exists {
 				id = len(dict)
 				dict[v] = id
-				t.storage.StringReads[loc.Index] = append(t.storage.StringReads[loc.Index], v)
+				t.activeBlock.Storage.StringReads[loc.Index] = append(t.activeBlock.Storage.StringReads[loc.Index], v)
 			}
-			t.storage.StringCols[loc.Index] = append(t.storage.StringCols[loc.Index], id)
+			t.activeBlock.Storage.StringCols[loc.Index] = append(t.activeBlock.Storage.StringCols[loc.Index], id)
 
 		default:
 			return fmt.Errorf("unsupported column type: %v", loc.Type)
 		}
 	}
 
+	t.activeBlock.RowCount++
 	t.rowCount++
 	t.lastTs = int(ts)
+
+	if t.activeBlock.RowCount >= MAX_BLOCK_SIZE {
+		path := fmt.Sprintf("data_internal/%s/%d_block.parquet", t.schema.Name, t.lastTs)
+		if err := t.activeBlock.Flush(path, t.schema, t.locations); err != nil {
+			return fmt.Errorf("failed to flush block: %v", err)
+		}
+
+		t.coldBlocks = append(t.coldBlocks, t.activeBlock)
+		colTypes := make([]schema.ColumnType, len(t.schema.Columns))
+		for i, col := range t.schema.Columns {
+			colTypes[i] = col.Type
+		}
+		nextBlock, _, err := NewBlock(colTypes)
+		if err != nil {
+			return fmt.Errorf("failed to create new block: %v", err)
+		}
+		t.activeBlock = nextBlock
+	}
 
 	return nil
 }
