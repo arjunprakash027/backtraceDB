@@ -2,9 +2,9 @@ package table
 
 import (
 	"backtraceDB/internal/schema"
-	"testing"
-	"os"
 	"fmt"
+	"os"
+	"testing"
 )
 
 func setupTestTable() (*Table, error) {
@@ -244,9 +244,13 @@ func TestBlockFlushing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fmt.Printf("Ingesting %d rows to trigger flush...\n", MAX_BLOCK_SIZE)
+	// Use a small block size for testing
+	const testBlockSize = 100
+	tbl.MaxBlockSize = testBlockSize
 
-	for i := 0; i < MAX_BLOCK_SIZE; i++ {
+	fmt.Printf("Ingesting %d rows to trigger flush...\n", testBlockSize)
+
+	for i := 0; i < testBlockSize; i++ {
 		row := map[string]any{
 			"ts":  int64(i),
 			"val": float64(i),
@@ -276,4 +280,170 @@ func TestBlockFlushing(t *testing.T) {
 	}
 
 	os.RemoveAll("data_internal")
+}
+
+func TestBlockLoadInto(t *testing.T) {
+	// 1. Setup
+	s := schema.Schema{
+		Name:       "load_test",
+		TimeColumn: "ts",
+		Columns: []schema.Column{
+			{Name: "ts", Type: schema.Int64},
+			{Name: "val", Type: schema.Float64},
+			{Name: "sym", Type: schema.String},
+		},
+	}
+
+	// Manual setup for test
+	colTypes := []schema.ColumnType{schema.Int64, schema.Float64, schema.String}
+	block, locations, err := NewBlock(colTypes)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Use Storage directly for this unit test
+	block.Storage.Int64Cols[locations[0].Index] = append(block.Storage.Int64Cols[locations[0].Index], 10)
+	block.Storage.Float64Cols[locations[1].Index] = append(block.Storage.Float64Cols[locations[1].Index], 10.5)
+
+	// String A
+	block.Storage.StringReads[locations[2].Index] = append(block.Storage.StringReads[locations[2].Index], "A")
+	block.Storage.StringCols[locations[2].Index] = append(block.Storage.StringCols[locations[2].Index], 0)
+	block.Storage.StringDicts[locations[2].Index]["A"] = 0
+
+	// Row 2
+	block.Storage.Int64Cols[locations[0].Index] = append(block.Storage.Int64Cols[locations[0].Index], 20)
+	block.Storage.Float64Cols[locations[1].Index] = append(block.Storage.Float64Cols[locations[1].Index], 20.5)
+
+	block.Storage.StringReads[locations[2].Index] = append(block.Storage.StringReads[locations[2].Index], "B")
+	block.Storage.StringCols[locations[2].Index] = append(block.Storage.StringCols[locations[2].Index], 1)
+	block.Storage.StringDicts[locations[2].Index]["B"] = 1
+
+	block.RowCount = 2
+
+	// 3. Flush to Disk
+	path := "data_internal/load_test/test.parquet"
+	if err := block.Flush(path, s, locations); err != nil {
+		t.Fatalf("Flush failed: %v", err)
+	}
+	defer os.RemoveAll("data_internal")
+
+	// 4. Test LoadInto
+	// Create a FRESH storage destination
+	destStorage, _, _ := NewColumnStorage(colTypes)
+
+	if err := block.LoadInto(destStorage, s, locations); err != nil {
+		t.Fatalf("LoadInto failed: %v", err)
+	}
+
+	// 5. Verify Content
+	// Check Row Count (Implicitly via slice len)
+	if len(destStorage.Int64Cols[locations[0].Index]) != 2 {
+		t.Errorf("Expected 2 rows, got %d", len(destStorage.Int64Cols[locations[0].Index]))
+	}
+
+	// Check Values
+	val1 := destStorage.Float64Cols[locations[1].Index][0]
+	if val1 != 10.5 {
+		t.Errorf("Expected 10.5, got %f", val1)
+	}
+
+	// Check String Reconstruction
+	strID := destStorage.StringCols[locations[2].Index][1] // Row 2 ("B")
+	strVal := destStorage.StringReads[locations[2].Index][strID]
+	if strVal != "B" {
+		t.Errorf("Expected 'B', got '%s'", strVal)
+	}
+
+	fmt.Println("✅ LoadInto Test Passed!")
+}
+
+func TestEndToEndIntegration(t *testing.T) {
+	// Setup
+	s := schema.Schema{
+		Name:       "e2e_test",
+		TimeColumn: "ts",
+		Columns: []schema.Column{
+			{Name: "ts", Type: schema.Int64},
+			{Name: "val", Type: schema.Int64},
+		},
+	}
+
+	tbl, err := CreateTable(s, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Set small block size to force flushes
+	// Size = 100
+	// We will insert 250 rows: 0-249
+	// Block 1 (Disk): 0-99
+	// Block 2 (Disk): 100-199
+	// Block 3 (Mem):  200-249
+	tbl.MaxBlockSize = 100
+
+	for i := 0; i < 250; i++ {
+		row := map[string]any{
+			"ts":  int64(i * 10),
+			"val": int64(i),
+		}
+		if err := tbl.AppendRow(row); err != nil {
+			t.Fatalf("failed to append row %d: %v", i, err)
+		}
+	}
+
+	defer os.RemoveAll("data_internal")
+
+	t.Run("ReadAll", func(t *testing.T) {
+		r := tbl.Reader()
+		count := 0
+		lastVal := int64(-1)
+		for {
+			row, ok := r.Next()
+			if !ok {
+				break
+			}
+			val := row["val"].(int64)
+			if val != lastVal+1 {
+				t.Errorf("expected val %d, got %d", lastVal+1, val)
+			}
+			lastVal = val
+			count++
+		}
+		if count != 250 {
+			t.Errorf("expected 250 rows, got %d", count)
+		}
+	})
+
+	t.Run("FilterCrossBoundary", func(t *testing.T) {
+		// Filter val >= 180
+		// Should match:
+		// Disk Block 2: 180-199 (20 rows)
+		// Mem Block 3:  200-249 (50 rows)
+		// Total: 70
+
+		r := tbl.Reader().Filter("val", ">=", int64(180))
+
+		count := 0
+		// We expect values from 180 to 249
+		expectedStart := int64(180)
+		expectedCount := 70
+
+		for {
+			row, ok := r.Next()
+			if !ok {
+				break
+			}
+			val := row["val"].(int64)
+
+			expectedVal := expectedStart + int64(count)
+			if val != expectedVal {
+				t.Errorf("expected val %d at index %d, got %d", expectedVal, count, val)
+			}
+			count++
+		}
+
+		if count != expectedCount {
+			t.Errorf("expected %d rows, got %d", expectedCount, count)
+		}
+	})
 }

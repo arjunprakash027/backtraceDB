@@ -19,8 +19,8 @@ func generateStockData(count int) []map[string]any {
 		rows[i] = map[string]any{
 			"timestamp": baseTime + int64(i),
 			"symbol":    symbol,
-			"price":     100.0 + rand.Float64()*1000.0, // Price between 100 and 1100
-			"volume":    int64(rand.Intn(10000) + 1),   // Volume between 1 and 10001
+			"price":     100.0 + rand.Float64()*1000.0,
+			"volume":    int64(rand.Intn(10000) + 1),
 		}
 	}
 	return rows
@@ -56,6 +56,7 @@ func SetupTableforBenchmark(count int) (*db.DB, schema.Schema, error) {
 		return nil, schema.Schema{}, err
 	}
 
+	tbl.MaxBlockSize = 1000
 	stockData := generateStockData(count)
 
 	for _, row := range stockData {
@@ -68,7 +69,7 @@ func SetupTableforBenchmark(count int) (*db.DB, schema.Schema, error) {
 
 func BenchmarkCreationWithWal(b *testing.B) {
 
-	rowCount := 100_000
+	rowCount := 10_000
 	stockData := generateStockData(rowCount)
 
 	b.SetBytes(int64(rowCount))
@@ -107,6 +108,7 @@ func BenchmarkCreationWithWal(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
+		tbl.MaxBlockSize = 1000
 
 		for _, row := range stockData {
 			if err := tbl.AppendRow(row); err != nil {
@@ -119,7 +121,7 @@ func BenchmarkCreationWithWal(b *testing.B) {
 
 func BenchmarkCreationWithoutWal(b *testing.B) {
 
-	rowCount := 100_000
+	rowCount := 10_000
 	stockData := generateStockData(rowCount)
 
 	b.SetBytes(int64(rowCount))
@@ -158,6 +160,7 @@ func BenchmarkCreationWithoutWal(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
+		tbl.MaxBlockSize = 1000
 
 		for _, row := range stockData {
 			if err := tbl.AppendRow(row); err != nil {
@@ -169,7 +172,7 @@ func BenchmarkCreationWithoutWal(b *testing.B) {
 }
 func BenchmarkWalReplay(b *testing.B) {
 
-	rowCount := 100_000
+	rowCount := 10_000
 	_, s, err := SetupTableforBenchmark(rowCount)
 	b.SetBytes(int64(rowCount))
 
@@ -198,7 +201,7 @@ func BenchmarkWalReplay(b *testing.B) {
 
 func BenchmarkRetreivalSpeed(b *testing.B) {
 
-	rowCount := 100_000
+	rowCount := 10_000
 	stockData := generateStockData(rowCount)
 
 	b.SetBytes(int64(rowCount))
@@ -228,6 +231,7 @@ func BenchmarkRetreivalSpeed(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
+	tbl.MaxBlockSize = 1000
 
 	for _, row := range stockData {
 		if err := tbl.AppendRow(row); err != nil {
@@ -255,7 +259,7 @@ func BenchmarkRetreivalSpeed(b *testing.B) {
 
 func BenchmarkRetreivalSpeedWithFilter(b *testing.B) {
 
-	rowCount := 1_000_000
+	rowCount := 10_000
 	stockData := generateStockData(rowCount)
 
 	b.SetBytes(int64(rowCount))
@@ -285,6 +289,7 @@ func BenchmarkRetreivalSpeedWithFilter(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
+	tbl.MaxBlockSize = 1000
 
 	for _, row := range stockData {
 		if err := tbl.AppendRow(row); err != nil {
@@ -359,7 +364,7 @@ func BenchmarkRetreivalSpeedWithFilter(b *testing.B) {
 	b.Run("TimeFilter", func(b *testing.B) {
 		b.SetBytes(int64(rowCount))
 		for i := 0; i < b.N; i++ {
-			r := tbl.Reader().Filter("timestamp", ">", int64(1673628000000 + 500_000))
+			r := tbl.Reader().Filter("timestamp", ">", int64(1673628000000+5000))
 			for {
 				if _, ok := r.Next(); !ok {
 					break
@@ -371,7 +376,7 @@ func BenchmarkRetreivalSpeedWithFilter(b *testing.B) {
 	b.Run("TimeFilterSlice", func(b *testing.B) {
 		b.SetBytes(int64(rowCount))
 		for i := 0; i < b.N; i++ {
-			r := tbl.Reader().Filter("timestamp", ">", int64(1673628000000 + 500_000)).Filter("timestamp", "<", int64(1673628000000 + 500_000 + 300_000))
+			r := tbl.Reader().Filter("timestamp", ">", int64(1673628000000+5000)).Filter("timestamp", "<", int64(1673628000000+5000+3000))
 			for {
 				if _, ok := r.Next(); !ok {
 					break
