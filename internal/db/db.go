@@ -5,14 +5,13 @@ import (
 	"backtraceDB/internal/table"
 	"backtraceDB/internal/wal"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sync"
 )
 
 type DB struct {
-	mu sync.RWMutex
-	name string
+	mu     sync.RWMutex
+	name   string
 	tables map[string]*table.Table
 }
 
@@ -22,7 +21,7 @@ type CreateTableOptions struct { //options while creating a table, simple for no
 
 func Open(name string) (*DB, error) {
 	return &DB{
-		name: name,
+		name:   name,
 		tables: make(map[string]*table.Table),
 	}, nil
 }
@@ -39,7 +38,7 @@ func (db *DB) CreateTable(s schema.Schema, opts *CreateTableOptions) (*table.Tab
 	var w *wal.WAL
 
 	if opts.EnableWal {
-		tablePath := filepath.Join(db.name, s.Name)
+		tablePath := filepath.Join("_data_internal", db.name, s.Name)
 		walPath := filepath.Join(tablePath, "wal")
 		var err error
 		w, err = wal.NewWAL(walPath, s)
@@ -47,8 +46,8 @@ func (db *DB) CreateTable(s schema.Schema, opts *CreateTableOptions) (*table.Tab
 			return nil, err
 		}
 	}
-	
-	t, err := table.CreateTable(s, w)
+
+	t, err := table.CreateTable(s, w, db.name)
 	if err != nil {
 		return nil, err
 	}
@@ -58,7 +57,6 @@ func (db *DB) CreateTable(s schema.Schema, opts *CreateTableOptions) (*table.Tab
 }
 
 func (db *DB) OpenTable(s schema.Schema) (*table.Table, error) {
-	
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -66,7 +64,7 @@ func (db *DB) OpenTable(s schema.Schema) (*table.Table, error) {
 		return tbl, nil
 	}
 
-	tablePath := filepath.Join(db.name, s.Name)
+	tablePath := filepath.Join("_data_internal", db.name, s.Name)
 	walPath := filepath.Join(tablePath, "wal")
 
 	wal, err := wal.NewWAL(walPath, s)
@@ -74,13 +72,22 @@ func (db *DB) OpenTable(s schema.Schema) (*table.Table, error) {
 		return nil, fmt.Errorf("failed to open WAL: %v", err)
 	}
 
-	t, err := table.CreateTable(s, wal)
+	t, err := table.CreateTable(s, wal, db.name)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create table: %v", err)
 	}
 
+	if err := t.LoadFromDisk(); err != nil {
+		return nil, fmt.Errorf("failed to load parquet data: %v", err)
+	}
+
 	if err := wal.ReplayTable(t); err != nil {
 		return nil, fmt.Errorf("failed to replay WAL: %v", err)
+	}
+
+	// once replayed, we will truncate the WAL to prevent double loading on next start
+	if err := wal.Reset(); err != nil {
+		return nil, fmt.Errorf("failed to clear WAL after recovery: %v", err)
 	}
 
 	db.tables[s.Name] = t
@@ -110,5 +117,10 @@ func (db *DB) ListAllTables() []string {
 }
 
 func (db *DB) Close() error {
-	return os.RemoveAll("data_internal")
+	for _, tbl := range db.tables {
+		if err := tbl.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
 }

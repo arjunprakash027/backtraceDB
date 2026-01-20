@@ -5,6 +5,7 @@ import (
 	"backtraceDB/internal/schema"
 	"math/rand"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -29,7 +30,7 @@ func generateStockData(count int) []map[string]any {
 func SetupTableforBenchmark(count int) (*db.DB, schema.Schema, error) {
 
 	dbName := "benchmark_test_db"
-	os.RemoveAll(dbName)
+	os.RemoveAll(filepath.Join("_data_internal", dbName))
 
 	database, err := db.Open(dbName)
 	if err != nil {
@@ -74,7 +75,7 @@ func BenchmarkCreationWithWal(b *testing.B) {
 
 	b.SetBytes(int64(rowCount))
 
-	defer os.RemoveAll("benchmark_test_db")
+	defer os.RemoveAll(filepath.Join("_data_internal", "benchmark_test_db"))
 
 	b.ResetTimer()
 
@@ -95,10 +96,10 @@ func BenchmarkCreationWithWal(b *testing.B) {
 		}
 
 		database, err := db.Open("benchmark_test_db")
-		defer database.Close()
 		if err != nil {
 			b.Fatal(err)
 		}
+		defer database.Close()
 
 		opts := &db.CreateTableOptions{
 			EnableWal: true,
@@ -124,51 +125,97 @@ func BenchmarkCreationWithoutWal(b *testing.B) {
 	rowCount := 10_000
 	stockData := generateStockData(rowCount)
 
-	b.SetBytes(int64(rowCount))
+	b.Run("Memory-Parquet", func(b *testing.B) {
+		b.SetBytes(int64(rowCount))
 
-	defer os.RemoveAll("benchmark_test_db")
+		defer os.RemoveAll(filepath.Join("_data_internal", "benchmark_test_db"))
 
-	b.ResetTimer()
+		b.ResetTimer()
 
-	for i := 0; i < b.N; i++ {
-		b.StopTimer()
+		for i := 0; i < b.N; i++ {
+			b.StopTimer()
 
-		b.StartTimer()
+			b.StartTimer()
 
-		s := schema.Schema{
-			Name:       "Testing",
-			TimeColumn: "timestamp",
-			Columns: []schema.Column{
-				{Name: "timestamp", Type: schema.Int64},
-				{Name: "symbol", Type: schema.String},
-				{Name: "price", Type: schema.Float64},
-				{Name: "volume", Type: schema.Int64},
-			},
-		}
+			s := schema.Schema{
+				Name:       "Testing",
+				TimeColumn: "timestamp",
+				Columns: []schema.Column{
+					{Name: "timestamp", Type: schema.Int64},
+					{Name: "symbol", Type: schema.String},
+					{Name: "price", Type: schema.Float64},
+					{Name: "volume", Type: schema.Int64},
+				},
+			}
 
-		database, err := db.Open("benchmark_test_db")
-		defer database.Close()
-		if err != nil {
-			b.Fatal(err)
-		}
-
-		opts := &db.CreateTableOptions{
-			EnableWal: false,
-		}
-
-		tbl, err := database.CreateTable(s, opts)
-		if err != nil {
-			b.Fatal(err)
-		}
-		tbl.MaxBlockSize = 1000
-
-		for _, row := range stockData {
-			if err := tbl.AppendRow(row); err != nil {
+			database, err := db.Open("benchmark_test_db")
+			if err != nil {
 				b.Fatal(err)
 			}
-		}
+			defer database.Close()
 
-	}
+			opts := &db.CreateTableOptions{
+				EnableWal: false,
+			}
+
+			tbl, err := database.CreateTable(s, opts)
+			if err != nil {
+				b.Fatal(err)
+			}
+			tbl.MaxBlockSize = 1000
+
+			for _, row := range stockData {
+				if err := tbl.AppendRow(row); err != nil {
+					b.Fatal(err)
+				}
+			}
+
+		}
+	})
+
+	b.Run("InDisk-Parquet", func(b *testing.B) {
+		b.SetBytes(int64(rowCount))
+		defer os.RemoveAll(filepath.Join("_data_internal", "benchmark_test_db"))
+		b.ResetTimer()
+
+		for i := 0; i < b.N; i++ {
+			os.RemoveAll(filepath.Join("_data_internal", "benchmark_test_db"))
+
+			database, err := db.Open("benchmark_test_db")
+			if err != nil {
+				b.Fatal(err)
+			}
+
+			s := schema.Schema{
+				Name:       "Testing",
+				TimeColumn: "timestamp",
+				Columns: []schema.Column{
+					{Name: "timestamp", Type: schema.Int64},
+					{Name: "symbol", Type: schema.String},
+					{Name: "price", Type: schema.Float64},
+					{Name: "volume", Type: schema.Int64},
+				},
+			}
+
+			tbl, err := database.CreateTable(s, &db.CreateTableOptions{EnableWal: false})
+			if err != nil {
+				database.Close()
+				b.Fatal(err)
+			}
+
+			tbl.UseDiskStorage = true
+			tbl.MaxBlockSize = 1000
+
+			for _, row := range stockData {
+				if err := tbl.AppendRow(row); err != nil {
+					database.Close()
+					b.Fatal(err)
+				}
+			}
+
+			database.Close()
+		}
+	})
 }
 func BenchmarkWalReplay(b *testing.B) {
 
@@ -176,7 +223,7 @@ func BenchmarkWalReplay(b *testing.B) {
 	_, s, err := SetupTableforBenchmark(rowCount)
 	b.SetBytes(int64(rowCount))
 
-	defer os.RemoveAll("benchmark_test_db")
+	defer os.RemoveAll(filepath.Join("_data_internal", "benchmark_test_db"))
 
 	if err != nil {
 		b.Fatal(err)
@@ -187,11 +234,14 @@ func BenchmarkWalReplay(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
 
-		database, _ := db.Open("benchmark_test_db")
+		database, err := db.Open("benchmark_test_db")
+		if err != nil {
+			b.Fatal(err)
+		}
 		defer database.Close()
 		b.StartTimer()
 
-		_, err := database.OpenTable(s)
+		_, err = database.OpenTable(s)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -200,14 +250,11 @@ func BenchmarkWalReplay(b *testing.B) {
 }
 
 func BenchmarkRetreivalSpeed(b *testing.B) {
-
 	rowCount := 10_000
 	stockData := generateStockData(rowCount)
 
-	b.SetBytes(int64(rowCount))
-
 	s := schema.Schema{
-		Name:       "Testing",
+		Name:       "RetreivalBench",
 		TimeColumn: "timestamp",
 		Columns: []schema.Column{
 			{Name: "timestamp", Type: schema.Int64},
@@ -217,43 +264,104 @@ func BenchmarkRetreivalSpeed(b *testing.B) {
 		},
 	}
 
-	database, err := db.Open("benchmark_test_db")
-	defer database.Close()
-	if err != nil {
-		b.Fatal(err)
-	}
+	b.Run("Memory-Parquet", func(b *testing.B) {
+		b.SetBytes(int64(rowCount))
+		dbPath := "bench_mem_retreival"
+		database, _ := db.Open(dbPath)
+		defer os.RemoveAll(filepath.Join("_data_internal", dbPath))
+		defer database.Close()
 
-	opts := &db.CreateTableOptions{
-		EnableWal: false,
-	}
+		tbl, _ := database.CreateTable(s, &db.CreateTableOptions{EnableWal: false})
+		tbl.MaxBlockSize = 1000
+		tbl.UseDiskStorage = false
 
-	tbl, err := database.CreateTable(s, opts)
-	if err != nil {
-		b.Fatal(err)
-	}
-	tbl.MaxBlockSize = 1000
-
-	for _, row := range stockData {
-		if err := tbl.AppendRow(row); err != nil {
-			b.Fatal(err)
+		for _, r := range stockData {
+			_ = tbl.AppendRow(r)
 		}
+
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			r := tbl.Reader()
+			for {
+				if _, ok := r.Next(); !ok {
+					break
+				}
+			}
+		}
+	})
+
+	b.Run("Disk-Parquet", func(b *testing.B) {
+		b.SetBytes(int64(rowCount))
+		dbPath := "bench_disk_retreival"
+		database, _ := db.Open(dbPath)
+		defer os.RemoveAll(filepath.Join("_data_internal", dbPath))
+		defer database.Close()
+
+		tbl, _ := database.CreateTable(s, &db.CreateTableOptions{EnableWal: false})
+		tbl.MaxBlockSize = 1000
+		tbl.UseDiskStorage = true
+
+		for _, r := range stockData {
+			_ = tbl.AppendRow(r)
+		}
+
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			r := tbl.Reader()
+			for {
+				if _, ok := r.Next(); !ok {
+					break
+				}
+			}
+		}
+	})
+}
+
+func BenchmarkLoadSpeedFromDisk(b *testing.B) {
+	rowCount := 10_000
+	b.SetBytes(int64(rowCount))
+	stockData := generateStockData(rowCount)
+	s := schema.Schema{
+		Name:       "LoadBench",
+		TimeColumn: "timestamp",
+		Columns: []schema.Column{
+			{Name: "timestamp", Type: schema.Int64},
+			{Name: "symbol", Type: schema.String},
+			{Name: "price", Type: schema.Float64},
+			{Name: "volume", Type: schema.Int64},
+		},
 	}
+
+	dbPath := "bench_load_speed"
+	database, _ := db.Open(dbPath)
+	defer os.RemoveAll(filepath.Join("_data_internal", dbPath))
+
+	tbl, _ := database.CreateTable(s, &db.CreateTableOptions{EnableWal: false})
+	tbl.MaxBlockSize = 1000
+	tbl.UseDiskStorage = true
+
+	for _, r := range stockData {
+		_ = tbl.AppendRow(r)
+	}
+	database.Close()
 
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		b.StopTimer()
+		// Measure just the discovery + initial reading
+		dbNew, _ := db.Open(dbPath)
 
-		b.StartTimer()
+		// This measures discovery (naming convention parsing)
+		tblNew, _ := dbNew.OpenTable(s)
 
-		tblReader := tbl.Reader()
-
+		// If we want to measure the ACTUAL loading of data into memory, we must read
+		r := tblNew.Reader()
 		for {
-			_, ok := tblReader.Next()
-			if !ok {
+			if _, ok := r.Next(); !ok {
 				break
 			}
 		}
+		dbNew.Close()
 	}
 }
 
@@ -276,10 +384,10 @@ func BenchmarkRetreivalSpeedWithFilter(b *testing.B) {
 	}
 
 	database, err := db.Open("benchmark_test_db")
-	defer database.Close()
 	if err != nil {
 		b.Fatal(err)
 	}
+	defer database.Close()
 
 	opts := &db.CreateTableOptions{
 		EnableWal: false,

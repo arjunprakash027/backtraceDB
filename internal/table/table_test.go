@@ -4,6 +4,7 @@ import (
 	"backtraceDB/internal/schema"
 	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -19,7 +20,7 @@ func setupTestTable() (*Table, error) {
 		},
 	}
 
-	tbl, err := CreateTable(s, nil)
+	tbl, err := CreateTable(s, nil, "test_db")
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +119,7 @@ func TestMultiTimestampEquality(t *testing.T) {
 		Name: "multi_ts", TimeColumn: "ts",
 		Columns: []schema.Column{{Name: "ts", Type: schema.Int64}},
 	}
-	tbl, _ := CreateTable(s, nil)
+	tbl, _ := CreateTable(s, nil, "test_db")
 	tbl.AppendRow(map[string]any{"ts": int64(100)})
 	tbl.AppendRow(map[string]any{"ts": int64(200)})
 	tbl.AppendRow(map[string]any{"ts": int64(200)}) // Duplicate
@@ -239,47 +240,84 @@ func TestBlockFlushing(t *testing.T) {
 		},
 	}
 
-	tbl, err := CreateTable(s, nil)
-	if err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name    string
+		useDisk bool
+	}{
+		{"DiskPersistence", true},
+		{"MemoryPersistence", false},
 	}
 
-	// Use a small block size for testing
-	const testBlockSize = 100
-	tbl.MaxBlockSize = testBlockSize
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer os.RemoveAll(filepath.Join("_data_internal", "test_db"))
 
-	fmt.Printf("Ingesting %d rows to trigger flush...\n", testBlockSize)
+			tbl, err := CreateTable(s, nil, "test_db")
+			if err != nil {
+				t.Fatal(err)
+			}
 
-	for i := 0; i < testBlockSize; i++ {
-		row := map[string]any{
-			"ts":  int64(i),
-			"val": float64(i),
-		}
-		if err := tbl.AppendRow(row); err != nil {
-			t.Fatalf("failed at row %d: %v", i, err)
-		}
+			const testBlockSize = 50
+			tbl.MaxBlockSize = testBlockSize
+			tbl.UseDiskStorage = tt.useDisk
+
+			// Ingest rows to trigger flush
+			for i := 0; i < testBlockSize; i++ {
+				row := map[string]any{
+					"ts":  int64(i),
+					"val": float64(i),
+				}
+				if err := tbl.AppendRow(row); err != nil {
+					t.Fatalf("failed at row %d: %v", i, err)
+				}
+			}
+
+			if len(tbl.coldBlocks) != 1 {
+				t.Fatalf("expected 1 cold block, got %d", len(tbl.coldBlocks))
+			}
+
+			coldBlock := tbl.coldBlocks[0]
+
+			// Verify RAM purging
+			if coldBlock.Storage != nil {
+				t.Error("expected cold block Storage to be nil (purged from RAM)")
+			}
+
+			if tt.useDisk {
+				if !coldBlock.isOnDisk {
+					t.Error("expected cold block to be flagged as on disk")
+				}
+				if _, err := os.Stat(coldBlock.Path); os.IsNotExist(err) {
+					t.Errorf("parquet file not found at %s", coldBlock.Path)
+				}
+			} else {
+				if coldBlock.isOnDisk {
+					t.Error("expected cold block to NOT be flagged as on disk")
+				}
+				if len(coldBlock.inMemoryData) == 0 {
+					t.Error("expected in-memory parquet data to be present")
+				}
+			}
+
+			// Core verification: Can we read it back?
+			r := tbl.Reader()
+			count := 0
+			for {
+				row, ok := r.Next()
+				if !ok {
+					break
+				}
+				if row["ts"].(int64) != int64(count) {
+					t.Errorf("data mismatch: expected %d, got %v", count, row["ts"])
+				}
+				count++
+			}
+
+			if count != testBlockSize {
+				t.Errorf("expected %d rows read back, got %d", testBlockSize, count)
+			}
+		})
 	}
-
-	if len(tbl.coldBlocks) != 1 {
-		t.Fatalf("expected 1 cold block, got %d", len(tbl.coldBlocks))
-	}
-
-	coldBlock := tbl.coldBlocks[0]
-
-	if coldBlock.Storage != nil {
-		t.Error("expected cold block Storage to be nil (purged from RAM)")
-	}
-
-	if !coldBlock.isOnDisk {
-		t.Error("expected cold block to be flagged as on disk")
-	}
-	if _, err := os.Stat(coldBlock.Path); os.IsNotExist(err) {
-		t.Errorf("parquet file not found at %s", coldBlock.Path)
-	} else {
-		fmt.Printf("✅ Success! Parquet file created at: %s\n", coldBlock.Path)
-	}
-
-	os.RemoveAll("data_internal")
 }
 
 func TestBlockLoadInto(t *testing.T) {
@@ -321,11 +359,11 @@ func TestBlockLoadInto(t *testing.T) {
 	block.RowCount = 2
 
 	// 3. Flush to Disk
-	path := "data_internal/load_test/test.parquet"
-	if err := block.Flush(path, s, locations); err != nil {
+	path := "_data_internal/test_db/load_test/test.parquet"
+	if err := block.Rotate(true, path, s, locations); err != nil {
 		t.Fatalf("Flush failed: %v", err)
 	}
-	defer os.RemoveAll("data_internal")
+	defer os.RemoveAll(filepath.Join("_data_internal", "test_db"))
 
 	// 4. Test LoadInto
 	// Create a FRESH storage destination
@@ -368,17 +406,12 @@ func TestEndToEndIntegration(t *testing.T) {
 		},
 	}
 
-	tbl, err := CreateTable(s, nil)
+	tbl, err := CreateTable(s, nil, "test_db")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Set small block size to force flushes
-	// Size = 100
-	// We will insert 250 rows: 0-249
-	// Block 1 (Disk): 0-99
-	// Block 2 (Disk): 100-199
-	// Block 3 (Mem):  200-249
 	tbl.MaxBlockSize = 100
 
 	for i := 0; i < 250; i++ {
@@ -391,7 +424,7 @@ func TestEndToEndIntegration(t *testing.T) {
 		}
 	}
 
-	defer os.RemoveAll("data_internal")
+	defer os.RemoveAll(filepath.Join("_data_internal", "test_db"))
 
 	t.Run("ReadAll", func(t *testing.T) {
 		r := tbl.Reader()

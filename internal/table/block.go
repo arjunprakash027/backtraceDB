@@ -2,6 +2,7 @@ package table
 
 import (
 	"backtraceDB/internal/schema"
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -15,6 +16,10 @@ type Block struct {
 	RowCount int
 	Path     string
 	isOnDisk bool
+	MaxTs    int64
+
+	isClosed     bool
+	inMemoryData []byte
 }
 
 func NewBlock(colTypes []schema.ColumnType) (*Block, []ColumnLocation, error) {
@@ -25,24 +30,34 @@ func NewBlock(colTypes []schema.ColumnType) (*Block, []ColumnLocation, error) {
 		RowCount: 0,
 		Path:     "",
 		isOnDisk: false,
+		MaxTs:    0,
 	}, locations, err
 }
 
 func (b *Block) LoadInto(dest *ColumnStorage, s schema.Schema, locations []ColumnLocation) error {
-	if !b.isOnDisk {
-		return fmt.Errorf("LoadCurrentBlock is called on non disk block")
-	}
 
-	f, err := os.Open(b.Path)
-	if err != nil {
-		return fmt.Errorf("failed to open block file: %v", err)
-	}
-	defer f.Close()
+	var pf *parquet.File
+	var err error
 
-	stat, _ := f.Stat()
-	pf, err := parquet.OpenFile(f, stat.Size())
-	if err != nil {
-		return err
+	if len(b.inMemoryData) > 0 {
+		pf, err = parquet.OpenFile(bytes.NewReader(b.inMemoryData), int64(len(b.inMemoryData)))
+		if err != nil {
+			return fmt.Errorf("failed to open block file: %v", err)
+		}
+	} else if b.isOnDisk {
+		f, err := os.Open(b.Path)
+		if err != nil {
+			return fmt.Errorf("failed to open block file: %v", err)
+		}
+		defer f.Close()
+
+		stat, _ := f.Stat()
+		pf, err = parquet.OpenFile(f, stat.Size())
+		if err != nil {
+			return err
+		}
+	} else {
+		return fmt.Errorf("block is not on disk and has no in memory data")
 	}
 
 	fileSchema := pf.Schema()
@@ -51,7 +66,7 @@ func (b *Block) LoadInto(dest *ColumnStorage, s schema.Schema, locations []Colum
 		parquetColIndices[col.Name()] = i
 	}
 
-	valueBuffer := make([]parquet.Value, 256)
+	valueBuffer := make([]parquet.Value, 256) //256 is small enough to fit into l1/l2 cache
 
 	for logicalIdx, col := range s.Columns {
 
@@ -118,18 +133,7 @@ func (b *Block) LoadInto(dest *ColumnStorage, s schema.Schema, locations []Colum
 	return nil
 }
 
-func (b *Block) Flush(filePath string, s schema.Schema, locations []ColumnLocation) error {
-
-	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
-		return fmt.Errorf("failed to create directory: %v", err)
-	}
-
-	f, err := os.Create(filePath)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
+func (b *Block) WriteParquetTo(w io.Writer, s schema.Schema, locations []ColumnLocation) error {
 	pqFields := make(map[string]parquet.Node)
 
 	for _, col := range s.Columns {
@@ -145,10 +149,11 @@ func (b *Block) Flush(filePath string, s schema.Schema, locations []ColumnLocati
 
 	pqSchema := parquet.NewSchema(s.Name, parquet.Group(pqFields))
 
-	writer := parquet.NewGenericWriter[any](f, pqSchema)
+	writer := parquet.NewGenericWriter[any](w, pqSchema)
+
+	row := make(map[string]any)
 
 	for i := 0; i < b.RowCount; i++ {
-		row := make(map[string]any) //Optimization : reuse single map to avoid GC overhead
 		for logicalIdx, col := range s.Columns {
 			loc := locations[logicalIdx]
 			switch col.Type {
@@ -167,13 +172,76 @@ func (b *Block) Flush(filePath string, s schema.Schema, locations []ColumnLocati
 		}
 	}
 
-	if err := writer.Close(); err != nil {
-		return fmt.Errorf("failed to close writer: %v", err)
+	return writer.Close()
+}
+
+func (b *Block) Rotate(useDisk bool, filePath string, s schema.Schema, locations []ColumnLocation) error {
+
+	if useDisk {
+		if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
+			return fmt.Errorf("failed to create directory: %v", err)
+		}
+
+		f, err := os.Create(filePath)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+
+		if err := b.WriteParquetTo(f, s, locations); err != nil {
+			return err
+		}
+
+		b.inMemoryData = nil
+		b.Path = filePath
+		b.isOnDisk = true
+
+	} else {
+
+		var buf bytes.Buffer
+		if err := b.WriteParquetTo(&buf, s, locations); err != nil {
+			return err
+		}
+		b.inMemoryData = buf.Bytes()
+		b.Path = ""
+		b.isOnDisk = false
 	}
 
-	b.Path = filePath
-	b.isOnDisk = true
 	b.Storage = nil
+	b.isClosed = true
 
+	return nil
+}
+
+func (b *Block) Persist(path string, s schema.Schema, locations []ColumnLocation) error {
+	if b.isOnDisk {
+		return nil
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return fmt.Errorf("failed to create directory: %v", err)
+	}
+
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	if len(b.inMemoryData) > 0 {
+		_, err = io.Copy(f, bytes.NewReader(b.inMemoryData))
+		if err != nil {
+			return err
+		}
+	} else if b.Storage != nil {
+		if err := b.WriteParquetTo(f, s, locations); err != nil {
+			return err
+		}
+	}
+
+	b.Path = path
+	b.isOnDisk = true
+	b.inMemoryData = nil
+	b.Storage = nil
 	return nil
 }

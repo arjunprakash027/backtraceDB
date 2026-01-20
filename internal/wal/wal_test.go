@@ -1,9 +1,9 @@
 package wal_test
 
 import (
-	"backtraceDB/internal/wal"
 	"backtraceDB/internal/schema"
 	"backtraceDB/internal/table"
+	"backtraceDB/internal/wal"
 	"os"
 	"testing"
 )
@@ -39,7 +39,7 @@ func TestWAL(t *testing.T) {
 	}
 
 	// 3. Replay into a fresh Table
-	tbl, err := table.CreateTable(s, w)
+	tbl, err := table.CreateTable(s, w, "test_db")
 	if err != nil {
 		t.Fatal(err)
 	}

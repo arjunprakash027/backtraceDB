@@ -5,18 +5,24 @@ import (
 	"backtraceDB/internal/schema"
 	"backtraceDB/internal/wal"
 	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
 )
 
 type Table struct {
-	schema       schema.Schema
-	activeBlock  *Block
-	coldBlocks   []*Block
-	locations    []ColumnLocation
-	timeColIdx   int
-	lastTs       int
-	rowCount     int
-	wal          *wal.WAL
-	MaxBlockSize int
+	schema         schema.Schema
+	activeBlock    *Block
+	coldBlocks     []*Block
+	locations      []ColumnLocation
+	timeColIdx     int
+	lastTs         int
+	rowCount       int
+	wal            *wal.WAL
+	MaxBlockSize   int
+	UseDiskStorage bool
+	dbName         string
 }
 
 type Predicate struct {
@@ -52,7 +58,7 @@ func (t *Table) Reader() *TableReader {
 	}
 }
 
-func (tr *TableReader) Next() (map[string]any, bool) {
+func (tr *TableReader) Next() (map[string]any, bool) { // L1 optimization : instead of retruning single row, return vectorized values at single next pass
 
 	for {
 		if tr.currentStorage == nil || tr.localCursor >= len(tr.localMask) {
@@ -167,7 +173,7 @@ func (tr *TableReader) LoadNextBlock() error {
 
 	block := tr.blocks[tr.currentBlockIdx]
 
-	if !block.isOnDisk {
+	if !block.isOnDisk && block.Storage != nil {
 		tr.currentStorage = block.Storage
 	} else {
 		colTypes := make([]schema.ColumnType, len(tr.table.schema.Columns))
@@ -262,7 +268,7 @@ func (tr *TableReader) applyPredicates(p Predicate) error {
 	return nil
 }
 
-func CreateTable(s schema.Schema, w *wal.WAL) (*Table, error) {
+func CreateTable(s schema.Schema, w *wal.WAL, dbName string) (*Table, error) {
 
 	if err := s.Validate(); err != nil {
 		return nil, err
@@ -288,7 +294,7 @@ func CreateTable(s schema.Schema, w *wal.WAL) (*Table, error) {
 		return nil, err
 	}
 
-	return &Table{
+	t := &Table{
 		schema:       s,
 		activeBlock:  block,
 		coldBlocks:   []*Block{},
@@ -298,7 +304,10 @@ func CreateTable(s schema.Schema, w *wal.WAL) (*Table, error) {
 		rowCount:     0,
 		wal:          w,
 		MaxBlockSize: 10_000_000,
-	}, nil
+		dbName:       dbName,
+	}
+
+	return t, nil
 }
 
 func (t *Table) AppendHelper(row map[string]any) error {
@@ -370,10 +379,16 @@ func (t *Table) AppendHelper(row map[string]any) error {
 	t.activeBlock.RowCount++
 	t.rowCount++
 	t.lastTs = int(ts)
+	t.activeBlock.MaxTs = ts
 
 	if t.activeBlock.RowCount >= t.MaxBlockSize {
-		path := fmt.Sprintf("data_internal/%s/%d_block.parquet", t.schema.Name, t.lastTs)
-		if err := t.activeBlock.Flush(path, t.schema, t.locations); err != nil {
+		path := ""
+
+		if t.UseDiskStorage {
+			path = filepath.Join("_data_internal", t.dbName, t.schema.Name, fmt.Sprintf("Ts%dR%di%d.parquet", t.activeBlock.MaxTs, t.activeBlock.RowCount, len(t.coldBlocks)))
+		}
+
+		if err := t.activeBlock.Rotate(t.UseDiskStorage, path, t.schema, t.locations); err != nil {
 			return fmt.Errorf("failed to flush block: %v", err)
 		}
 
@@ -407,4 +422,95 @@ func (t *Table) LoadRowNoWAL(row map[string]any) error {
 
 func (t *Table) RowCount() int {
 	return t.rowCount
+}
+
+func (t *Table) Close() error {
+	if t.activeBlock.RowCount > 0 {
+		path := filepath.Join("_data_internal", t.dbName, t.schema.Name, fmt.Sprintf("Ts%dR%di%d.parquet", t.activeBlock.MaxTs, t.activeBlock.RowCount, len(t.coldBlocks)))
+		if err := t.activeBlock.Persist(path, t.schema, t.locations); err != nil {
+			return fmt.Errorf("failed to persist active block: %v", err)
+		}
+	}
+
+	for i, block := range t.coldBlocks {
+		if !block.isOnDisk {
+			path := filepath.Join("_data_internal", t.dbName, t.schema.Name, fmt.Sprintf("Ts%dR%di%d.parquet", block.MaxTs, block.RowCount, i))
+			if err := block.Persist(path, t.schema, t.locations); err != nil {
+				return fmt.Errorf("failed to persist cold block %d: %v", i, err)
+			}
+		}
+	}
+
+	return nil
+}
+
+func (t *Table) LoadFromDisk() error {
+	dirPath := filepath.Join("_data_internal", t.dbName, t.schema.Name)
+
+	info, err := os.Stat(dirPath)
+
+	if os.IsNotExist(err) {
+		return nil
+	}
+
+	if err != nil {
+		return fmt.Errorf("failed to check table directory: %v", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("path %s is not a directory", dirPath)
+	}
+
+	entries, err := os.ReadDir(dirPath)
+	if err != nil {
+		return fmt.Errorf("failed to read table directory: %v", err)
+	}
+
+	var loadedBlocks []*Block
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".parquet") {
+			continue
+		}
+
+		fullPath := filepath.Join(dirPath, name)
+
+		var maxTs int64
+		var rowCount int
+		var iter int
+		_, err := fmt.Sscanf(name, "Ts%dR%di%d.parquet", &maxTs, &rowCount, &iter)
+		if err != nil {
+			continue
+		}
+
+		block := &Block{
+			Path:     fullPath,
+			MaxTs:    maxTs,
+			RowCount: rowCount,
+			isOnDisk: true,
+			isClosed: true,
+		}
+
+		loadedBlocks = append(loadedBlocks, block)
+		t.rowCount += rowCount
+	}
+
+	sort.Slice(loadedBlocks, func(i, j int) bool {
+		return loadedBlocks[i].MaxTs < loadedBlocks[j].MaxTs
+	})
+
+	t.coldBlocks = append(t.coldBlocks, loadedBlocks...)
+
+	if len(loadedBlocks) > 0 {
+		lastBlock := loadedBlocks[len(loadedBlocks)-1]
+		if int(lastBlock.MaxTs) > t.lastTs {
+			t.lastTs = int(lastBlock.MaxTs)
+		}
+	}
+
+	return nil
 }
