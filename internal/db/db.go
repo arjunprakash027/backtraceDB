@@ -5,6 +5,7 @@ import (
 	"backtraceDB/internal/table"
 	"backtraceDB/internal/wal"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 )
@@ -66,13 +67,18 @@ func (db *DB) OpenTable(s schema.Schema) (*table.Table, error) {
 
 	tablePath := filepath.Join("_data_internal", db.name, s.Name)
 	walPath := filepath.Join(tablePath, "wal")
+	walFile := filepath.Join(walPath, "wal.dat")
 
-	wal, err := wal.NewWAL(walPath, s)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open WAL: %v", err)
+	var w *wal.WAL
+	if _, err := os.Stat(walFile); err == nil {
+		var err error
+		w, err = wal.NewWAL(walPath, s)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open WAL: %v", err)
+		}
 	}
 
-	t, err := table.CreateTable(s, wal, db.name)
+	t, err := table.CreateTable(s, w, db.name)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create table: %v", err)
 	}
@@ -81,13 +87,15 @@ func (db *DB) OpenTable(s schema.Schema) (*table.Table, error) {
 		return nil, fmt.Errorf("failed to load parquet data: %v", err)
 	}
 
-	if err := wal.ReplayTable(t); err != nil {
-		return nil, fmt.Errorf("failed to replay WAL: %v", err)
-	}
+	if w != nil {
+		if err := w.ReplayTable(t); err != nil {
+			return nil, fmt.Errorf("failed to replay WAL: %v", err)
+		}
 
-	// once replayed, we will truncate the WAL to prevent double loading on next start
-	if err := wal.Reset(); err != nil {
-		return nil, fmt.Errorf("failed to clear WAL after recovery: %v", err)
+		// once replayed, we will truncate the WAL to prevent double loading on next start
+		if err := w.Reset(); err != nil {
+			return nil, fmt.Errorf("failed to clear WAL after recovery: %v", err)
+		}
 	}
 
 	db.tables[s.Name] = t

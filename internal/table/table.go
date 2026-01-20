@@ -392,6 +392,12 @@ func (t *Table) AppendHelper(row map[string]any) error {
 			return fmt.Errorf("failed to flush block: %v", err)
 		}
 
+		if t.wal != nil && t.UseDiskStorage {
+			if err := t.wal.Reset(); err != nil {
+				return fmt.Errorf("failed to reset WAL after rotation: %v", err)
+			}
+		}
+
 		t.coldBlocks = append(t.coldBlocks, t.activeBlock)
 		colTypes := make([]schema.ColumnType, len(t.schema.Columns))
 		for i, col := range t.schema.Columns {
@@ -429,6 +435,12 @@ func (t *Table) Close() error {
 		path := filepath.Join("_data_internal", t.dbName, t.schema.Name, fmt.Sprintf("Ts%dR%di%d.parquet", t.activeBlock.MaxTs, t.activeBlock.RowCount, len(t.coldBlocks)))
 		if err := t.activeBlock.Persist(path, t.schema, t.locations); err != nil {
 			return fmt.Errorf("failed to persist active block: %v", err)
+		}
+
+		if t.wal != nil {
+			if err := t.wal.Reset(); err != nil {
+				return fmt.Errorf("failed to reset WAL on close: %v", err)
+			}
 		}
 	}
 
