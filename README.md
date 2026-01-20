@@ -5,14 +5,13 @@ BacktraceDB is a side project I'm using to tinker with database internals. It is
 
 ---
 
-## 🛠️ The Tinkerer's Invitation
-If you've ever wondered how a database *actually* works under the hood—how it flushes memory to disk, how it recovers from a crash using a WAL, or how columnar storage makes queries faster—this project is for you.
+## 🛠️ Come and Tinker
+If you've ever wondered how a database *actually* works under the hood like how it flushes memory to disk, how it recovers from a crash using a WAL, or how columnar storage makes queries faster, this project is for you.
 
 I'd love for people to:
 - **Take the code and break it**: See where the logical flaws are.
 - **Optimize the internals**: Can we make the Parquet reader faster? Can we improve the vectorized filter application?
 - **Suggest Features**: What's missing? Indices? Compression algorithms?
-- **Tinker with the Storage**: Experiment with the `Ts<timestamp>R<rowcount>i<iteration>` naming convention in `table.go`.
 
 ---
 
