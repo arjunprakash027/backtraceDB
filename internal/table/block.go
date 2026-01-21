@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/parquet-go/parquet-go"
 )
@@ -20,10 +21,25 @@ type Block struct {
 
 	isClosed     bool
 	inMemoryData []byte
+
+	IntMin   []int64
+	IntMax   []int64
+	FloatMin []float64
+	FloatMax []float64
 }
 
 func NewBlock(colTypes []schema.ColumnType) (*Block, []ColumnLocation, error) {
 	storage, locations, err := NewColumnStorage(colTypes)
+
+	numInt, numFloat := 0, 0
+	for _, t := range colTypes {
+		switch t {
+		case schema.Int64:
+			numInt++
+		case schema.Float64:
+			numFloat++
+		}
+	}
 
 	return &Block{
 		Storage:  storage,
@@ -31,6 +47,10 @@ func NewBlock(colTypes []schema.ColumnType) (*Block, []ColumnLocation, error) {
 		Path:     "",
 		isOnDisk: false,
 		MaxTs:    0,
+		IntMin:   make([]int64, numInt),
+		IntMax:   make([]int64, numInt),
+		FloatMin: make([]float64, numFloat),
+		FloatMax: make([]float64, numFloat),
 	}, locations, err
 }
 
@@ -175,7 +195,31 @@ func (b *Block) WriteParquetTo(w io.Writer, s schema.Schema, locations []ColumnL
 	return writer.Close()
 }
 
+func (b *Block) UpdateStats() {
+	if b.Storage == nil {
+		return
+	}
+
+	for i, col := range b.Storage.Int64Cols {
+		if len(col) == 0 {
+			continue
+		}
+		b.IntMax[i] = slices.Max(col)
+		b.IntMin[i] = slices.Min(col)
+	}
+
+	for i, col := range b.Storage.Float64Cols {
+		if len(col) == 0 {
+			continue
+		}
+		b.FloatMax[i] = slices.Max(col)
+		b.FloatMin[i] = slices.Min(col)
+	}
+
+}
 func (b *Block) Rotate(useDisk bool, filePath string, s schema.Schema, locations []ColumnLocation) error {
+
+	b.UpdateStats()
 
 	if useDisk {
 		if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
@@ -214,6 +258,8 @@ func (b *Block) Rotate(useDisk bool, filePath string, s schema.Schema, locations
 }
 
 func (b *Block) Persist(path string, s schema.Schema, locations []ColumnLocation) error {
+	b.UpdateStats()
+
 	if b.isOnDisk {
 		return nil
 	}

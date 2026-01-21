@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/parquet-go/parquet-go"
 )
 
 type Table struct {
@@ -517,7 +519,58 @@ func (t *Table) LoadFromDisk() error {
 			isOnDisk: true,
 			isClosed: true,
 		}
+		
+		// fill the statistics of the loaded blocks for filter to be efficient
+		f, err := os.Open(fullPath)
+		if err != nil {
+			continue // or handle error
+		}
+		defer f.Close()
+		stat, _ := f.Stat()
+		pf, err := parquet.OpenFile(f, stat.Size())
+		if err != nil {
+			continue
+		}
+		numInt, numFloat := 0, 0
+		for _, col := range t.schema.Columns {
+			if col.Type == schema.Int64 {
+				numInt++
+			}
+			if col.Type == schema.Float64 {
+				numFloat++
+			}
+		}
+		block.IntMin = make([]int64, numInt)
+		block.IntMax = make([]int64, numInt)
+		block.FloatMin = make([]float64, numFloat)
+		block.FloatMax = make([]float64, numFloat)
 
+		intCount, floatCount := 0, 0
+		rowGroup := pf.RowGroups()[0]
+		for i, col := range t.schema.Columns {
+
+			if i >= len(rowGroup.ColumnChunks()) {
+				break
+			}
+
+			chunk := rowGroup.ColumnChunks()[i]
+			idx, err := chunk.ColumnIndex()
+
+			if err == nil && idx != nil && idx.NumPages() > 0 {
+				switch col.Type {
+				case schema.Int64:
+					block.IntMin[intCount] = idx.MinValue(0).Int64()
+					block.IntMax[intCount] = idx.MaxValue(0).Int64()
+					intCount++
+				case schema.Float64:
+					block.FloatMin[floatCount] = idx.MinValue(0).Double()
+					block.FloatMax[floatCount] = idx.MaxValue(0).Double()
+					floatCount++
+				}
+			}
+		}
+
+		f.Close()
 		loadedBlocks = append(loadedBlocks, block)
 		t.rowCount += rowCount
 	}

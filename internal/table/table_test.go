@@ -444,6 +444,23 @@ func TestEndToEndIntegration(t *testing.T) {
 		t.Fatalf("failed to load table from disk: %v", err)
 	}
 
+	// Verification: Ensure Min/Max stats were recovered correctly from Parquet Metadata
+	if len(tbl.coldBlocks) != 3 {
+		t.Fatalf("Expected 3 cold blocks after load, got %d", len(tbl.coldBlocks))
+	}
+
+	// Block 0 should have val 0-99 (physical index 1)
+	b0 := tbl.coldBlocks[0]
+	if b0.IntMin[1] != 0 || b0.IntMax[1] != 99 {
+		t.Errorf("Block 0 Stats recovery failed: Expected [0, 99], got [%d, %d]", b0.IntMin[1], b0.IntMax[1])
+	}
+
+	// Block 2 (the one that was flushed on Close()) should have val 200-249
+	b2 := tbl.coldBlocks[2]
+	if b2.IntMin[1] != 200 || b2.IntMax[1] != 249 {
+		t.Errorf("Block 2 Stats recovery failed: Expected [200, 249], got [%d, %d]", b2.IntMin[1], b2.IntMax[1])
+	}
+
 	t.Run("ReadAll", func(t *testing.T) {
 		r := tbl.Reader()
 		count := 0
@@ -497,4 +514,28 @@ func TestEndToEndIntegration(t *testing.T) {
 			t.Errorf("expected %d rows, got %d", expectedCount, count)
 		}
 	})
+}
+
+func TestBlockStats(t *testing.T) {
+	colTypes := []schema.ColumnType{schema.Int64, schema.Float64, schema.Int64}
+
+	b, _, err := NewBlock(colTypes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Storage.Int64Cols[0] = []int64{100, 5, 500, 250}
+	b.Storage.Float64Cols[0] = []float64{10.5, 99.9, -5.5, 0.0}
+	b.Storage.Int64Cols[1] = []int64{-10, -50, -1}
+
+	b.UpdateStats()
+
+	if b.IntMin[0] != 5 || b.IntMax[0] != 500 {
+		t.Errorf("Int64[0] Mismatch: Expected [5, 500], got [%d, %d]", b.IntMin[0], b.IntMax[0])
+	}
+	if b.FloatMin[0] != -5.5 || b.FloatMax[0] != 99.9 {
+		t.Errorf("Float64[0] Mismatch: Expected [-5.5, 99.9], got [%f, %f]", b.FloatMin[0], b.FloatMax[0])
+	}
+	if b.IntMin[1] != -50 || b.IntMax[1] != -1 {
+		t.Errorf("Int64[1] Mismatch: Expected [-50, -1], got [%d, %d]", b.IntMin[1], b.IntMax[1])
+	}
 }
