@@ -406,25 +406,43 @@ func TestEndToEndIntegration(t *testing.T) {
 		},
 	}
 
-	tbl, err := CreateTable(s, nil, "test_db")
+	dbName := "e2e_test_db"
+	defer os.RemoveAll(filepath.Join("_data_internal", dbName))
+
+	// Phase 1: Create, write, and close
+	{
+		tbl, err := CreateTable(s, nil, dbName)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		tbl.MaxBlockSize = 100
+		tbl.UseDiskStorage = true
+
+		for i := 0; i < 250; i++ {
+			row := map[string]any{
+				"ts":  int64(i * 10),
+				"val": int64(i),
+			}
+			if err := tbl.AppendRow(row); err != nil {
+				t.Fatalf("failed to append row %d: %v", i, err)
+			}
+		}
+
+		if err := tbl.Close(); err != nil {
+			t.Fatalf("failed to close table: %v", err)
+		}
+	}
+
+	// Phase 2: Open fresh table and load from disk
+	tbl, err := CreateTable(s, nil, dbName)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Set small block size to force flushes
-	tbl.MaxBlockSize = 100
-
-	for i := 0; i < 250; i++ {
-		row := map[string]any{
-			"ts":  int64(i * 10),
-			"val": int64(i),
-		}
-		if err := tbl.AppendRow(row); err != nil {
-			t.Fatalf("failed to append row %d: %v", i, err)
-		}
+	if err := tbl.LoadFromDisk(); err != nil {
+		t.Fatalf("failed to load table from disk: %v", err)
 	}
-
-	defer os.RemoveAll(filepath.Join("_data_internal", "test_db"))
 
 	t.Run("ReadAll", func(t *testing.T) {
 		r := tbl.Reader()
