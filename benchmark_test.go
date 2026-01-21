@@ -48,11 +48,7 @@ func SetupTableforBenchmark(count int) (*db.DB, schema.Schema, error) {
 		},
 	}
 
-	opts := &db.CreateTableOptions{
-		EnableWal: true,
-	}
-
-	tbl, err := database.CreateTable(s, opts)
+	tbl, err := database.CreateTable(s)
 	if err != nil {
 		return nil, schema.Schema{}, err
 	}
@@ -68,59 +64,7 @@ func SetupTableforBenchmark(count int) (*db.DB, schema.Schema, error) {
 
 }
 
-func BenchmarkCreationWithWal(b *testing.B) {
-
-	rowCount := 10_000
-	stockData := generateStockData(rowCount)
-
-	b.SetBytes(int64(rowCount))
-
-	defer os.RemoveAll(filepath.Join("_data_internal", "benchmark_test_db"))
-
-	b.ResetTimer()
-
-	for i := 0; i < b.N; i++ {
-		b.StopTimer()
-
-		b.StartTimer()
-
-		s := schema.Schema{
-			Name:       "Testing",
-			TimeColumn: "timestamp",
-			Columns: []schema.Column{
-				{Name: "timestamp", Type: schema.Int64},
-				{Name: "symbol", Type: schema.String},
-				{Name: "price", Type: schema.Float64},
-				{Name: "volume", Type: schema.Int64},
-			},
-		}
-
-		database, err := db.Open("benchmark_test_db")
-		if err != nil {
-			b.Fatal(err)
-		}
-		defer database.Close()
-
-		opts := &db.CreateTableOptions{
-			EnableWal: true,
-		}
-
-		tbl, err := database.CreateTable(s, opts)
-		if err != nil {
-			b.Fatal(err)
-		}
-		tbl.MaxBlockSize = 1000
-
-		for _, row := range stockData {
-			if err := tbl.AppendRow(row); err != nil {
-				b.Fatal(err)
-			}
-		}
-
-	}
-}
-
-func BenchmarkCreationWithoutWal(b *testing.B) {
+func BenchmarkCreation(b *testing.B) {
 
 	rowCount := 10_000
 	stockData := generateStockData(rowCount)
@@ -154,11 +98,7 @@ func BenchmarkCreationWithoutWal(b *testing.B) {
 			}
 			defer database.Close()
 
-			opts := &db.CreateTableOptions{
-				EnableWal: false,
-			}
-
-			tbl, err := database.CreateTable(s, opts)
+			tbl, err := database.CreateTable(s)
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -173,7 +113,7 @@ func BenchmarkCreationWithoutWal(b *testing.B) {
 		}
 	})
 
-	b.Run("InDisk-Parquet", func(b *testing.B) {
+	b.Run("InDisk-Parquet-With-WAL", func(b *testing.B) {
 		b.SetBytes(int64(rowCount))
 		defer os.RemoveAll(filepath.Join("_data_internal", "benchmark_test_db"))
 		b.ResetTimer()
@@ -197,12 +137,13 @@ func BenchmarkCreationWithoutWal(b *testing.B) {
 				},
 			}
 
-			tbl, err := database.CreateTable(s, &db.CreateTableOptions{EnableWal: false})
+			tbl, err := database.CreateTable(s)
 			if err != nil {
 				database.Close()
 				b.Fatal(err)
 			}
 
+			// Enabling disk storage automatically enables the WAL lazily on first append
 			tbl.UseDiskStorage = true
 			tbl.MaxBlockSize = 1000
 
@@ -216,37 +157,6 @@ func BenchmarkCreationWithoutWal(b *testing.B) {
 			database.Close()
 		}
 	})
-}
-func BenchmarkWalReplay(b *testing.B) {
-
-	rowCount := 10_000
-	_, s, err := SetupTableforBenchmark(rowCount)
-	b.SetBytes(int64(rowCount))
-
-	defer os.RemoveAll(filepath.Join("_data_internal", "benchmark_test_db"))
-
-	if err != nil {
-		b.Fatal(err)
-	}
-
-	b.ResetTimer()
-
-	for i := 0; i < b.N; i++ {
-		b.StopTimer()
-
-		database, err := db.Open("benchmark_test_db")
-		if err != nil {
-			b.Fatal(err)
-		}
-		defer database.Close()
-		b.StartTimer()
-
-		_, err = database.OpenTable(s)
-		if err != nil {
-			b.Fatal(err)
-		}
-	}
-
 }
 
 func BenchmarkRetreivalSpeed(b *testing.B) {
@@ -271,7 +181,7 @@ func BenchmarkRetreivalSpeed(b *testing.B) {
 		defer os.RemoveAll(filepath.Join("_data_internal", dbPath))
 		defer database.Close()
 
-		tbl, _ := database.CreateTable(s, &db.CreateTableOptions{EnableWal: false})
+		tbl, _ := database.CreateTable(s)
 		tbl.MaxBlockSize = 1000
 		tbl.UseDiskStorage = false
 
@@ -290,14 +200,14 @@ func BenchmarkRetreivalSpeed(b *testing.B) {
 		}
 	})
 
-	b.Run("Disk-Parquet", func(b *testing.B) {
+	b.Run("InDisk-Parquet-With-WAL", func(b *testing.B) {
 		b.SetBytes(int64(rowCount))
 		dbPath := "bench_disk_retreival"
 		database, _ := db.Open(dbPath)
 		defer os.RemoveAll(filepath.Join("_data_internal", dbPath))
 		defer database.Close()
 
-		tbl, _ := database.CreateTable(s, &db.CreateTableOptions{EnableWal: false})
+		tbl, _ := database.CreateTable(s)
 		tbl.MaxBlockSize = 1000
 		tbl.UseDiskStorage = true
 
@@ -336,7 +246,7 @@ func BenchmarkLoadSpeedFromDisk(b *testing.B) {
 	database, _ := db.Open(dbPath)
 	defer os.RemoveAll(filepath.Join("_data_internal", dbPath))
 
-	tbl, _ := database.CreateTable(s, &db.CreateTableOptions{EnableWal: false})
+	tbl, _ := database.CreateTable(s)
 	tbl.MaxBlockSize = 1000
 	tbl.UseDiskStorage = true
 
@@ -389,11 +299,7 @@ func BenchmarkRetreivalSpeedWithFilter(b *testing.B) {
 	}
 	defer database.Close()
 
-	opts := &db.CreateTableOptions{
-		EnableWal: false,
-	}
-
-	tbl, err := database.CreateTable(s, opts)
+	tbl, err := database.CreateTable(s)
 	if err != nil {
 		b.Fatal(err)
 	}

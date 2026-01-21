@@ -414,11 +414,22 @@ func (t *Table) AppendHelper(row map[string]any) error {
 }
 func (t *Table) AppendRow(row map[string]any) error {
 
+	if t.UseDiskStorage && t.wal == nil {
+		tablePath := filepath.Join("_data_internal", t.dbName, t.schema.Name)
+		walPath := filepath.Join(tablePath, "wal")
+		var err error
+		t.wal, err = wal.NewWAL(walPath, t.schema)
+		if err != nil {
+			return fmt.Errorf("failed to create WAL: %v", err)
+		}
+	}
+
 	if t.wal != nil {
 		if err := t.wal.AppendRow(row); err != nil {
 			return fmt.Errorf("failed to append row to WAL: %v", err)
 		}
 	}
+
 	return t.AppendHelper(row)
 }
 
@@ -524,5 +535,6 @@ func (t *Table) LoadFromDisk() error {
 		}
 	}
 
+	t.UseDiskStorage = true //when using opentable if we find a evidence of disk storage, we set this to true
 	return nil
 }

@@ -2,11 +2,10 @@ package db
 
 import (
 	"backtraceDB/internal/schema"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
-	"fmt"
-	
 )
 
 func TestDBWorkFlow(t *testing.T) {
@@ -32,9 +31,7 @@ func TestDBWorkFlow(t *testing.T) {
 
 	// 3. Create Table
 
-	opts := &CreateTableOptions{}
-
-	tbl, err := database.CreateTable(s, opts)
+	tbl, err := database.CreateTable(s)
 	if err != nil {
 		t.Fatalf("Failed to create table: %v", err)
 	}
@@ -78,15 +75,12 @@ func TestRecoveryWorkflow(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		opts := &CreateTableOptions{
-			EnableWal: true,
-		}
-
-		tbl, err := database.CreateTable(s, opts)
+		tbl, err := database.CreateTable(s)
 		if err != nil {
 			t.Fatal(err)
 		}
 
+		tbl.UseDiskStorage = true
 		_ = tbl.AppendRow(map[string]any{"timestamp": int64(10), "value": 1.1})
 		_ = tbl.AppendRow(map[string]any{"timestamp": int64(20), "value": 2.2})
 
@@ -141,7 +135,7 @@ func TestFullPersistenceAndRecovery(t *testing.T) {
 			t.Fatalf("Phase 1: Failed to open DB: %v", err)
 		}
 
-		tbl, err := database.CreateTable(s, &CreateTableOptions{EnableWal: false})
+		tbl, err := database.CreateTable(s)
 		if err != nil {
 			t.Fatalf("Phase 1: Failed to create table: %v", err)
 		}

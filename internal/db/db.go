@@ -16,10 +16,6 @@ type DB struct {
 	tables map[string]*table.Table
 }
 
-type CreateTableOptions struct { //options while creating a table, simple for now, will add as database improves with more options
-	EnableWal bool
-}
-
 func Open(name string) (*DB, error) {
 	return &DB{
 		name:   name,
@@ -27,7 +23,7 @@ func Open(name string) (*DB, error) {
 	}, nil
 }
 
-func (db *DB) CreateTable(s schema.Schema, opts *CreateTableOptions) (*table.Table, error) {
+func (db *DB) CreateTable(s schema.Schema) (*table.Table, error) {
 
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -36,19 +32,7 @@ func (db *DB) CreateTable(s schema.Schema, opts *CreateTableOptions) (*table.Tab
 		return nil, fmt.Errorf("table %s already exists", s.Name)
 	}
 
-	var w *wal.WAL
-
-	if opts.EnableWal {
-		tablePath := filepath.Join("_data_internal", db.name, s.Name)
-		walPath := filepath.Join(tablePath, "wal")
-		var err error
-		w, err = wal.NewWAL(walPath, s)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	t, err := table.CreateTable(s, w, db.name)
+	t, err := table.CreateTable(s, nil, db.name)
 	if err != nil {
 		return nil, err
 	}
@@ -96,6 +80,8 @@ func (db *DB) OpenTable(s schema.Schema) (*table.Table, error) {
 		if err := w.Reset(); err != nil {
 			return nil, fmt.Errorf("failed to clear WAL after recovery: %v", err)
 		}
+
+		t.UseDiskStorage = true
 	}
 
 	db.tables[s.Name] = t
