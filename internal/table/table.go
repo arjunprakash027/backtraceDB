@@ -105,6 +105,15 @@ func (tr *TableReader) Next() (map[string]any, bool) { // L1 optimization : inst
 
 }
 
+func (t *Table) getColumnLocation(colName string) (ColumnLocation, bool) {
+	for i, col := range t.schema.Columns {
+		if col.Name == colName {
+			return t.locations[i], true
+		}
+	}
+	return ColumnLocation{}, false
+}
+
 func (tr *TableReader) evalInt64(a int64, op string, b int64) bool {
 	switch op {
 	case "==":
@@ -173,6 +182,32 @@ func (tr *TableReader) LoadNextBlock() error {
 		return fmt.Errorf("no more blocks to load")
 	}
 
+	for tr.currentBlockIdx < len(tr.blocks) {
+		block := tr.blocks[tr.currentBlockIdx]
+		
+		if block.Storage != nil {
+			break
+		}
+
+		skipBlock := false
+		for _, pred := range tr.predicates {
+			skip, err := tr.CanSkip(block, pred)
+			if err != nil {
+				return err
+			}
+			if skip {
+				skipBlock = true
+				break
+			}
+		}
+
+		if !skipBlock {
+			break
+		}
+
+		tr.currentBlockIdx++
+	}
+
 	block := tr.blocks[tr.currentBlockIdx]
 
 	if !block.isOnDisk && block.Storage != nil {
@@ -206,6 +241,63 @@ func (tr *TableReader) LoadNextBlock() error {
 	}
 
 	return nil
+
+}
+
+func (tr *TableReader) CanSkip(block *Block, predicate Predicate) (bool, error) {
+	loc, found := tr.table.getColumnLocation(predicate.ColName)
+	if !found {
+		return false, fmt.Errorf("column %s not found", predicate.ColName)
+	}
+
+	var min, max, target float64
+	
+	switch loc.Type {
+	case schema.Int64:
+		target = float64(0)
+		if v, ok := predicate.Value.(int64); ok {
+			target = float64(v)
+		} else if v, ok := predicate.Value.(int); ok {
+			target = float64(v)
+		} else {
+			return false, fmt.Errorf("invalid value type for int64 column: %T", predicate.Value)
+		}
+
+		min = float64(block.IntMin[loc.Index])
+		max = float64(block.IntMax[loc.Index])
+
+	case schema.Float64:
+		target = float64(0)
+		if v, ok := predicate.Value.(float64); ok {
+			target = v
+		} else if v, ok := predicate.Value.(int); ok {
+			target = float64(v)
+		} else {
+			return false, fmt.Errorf("invalid value type for float64 column: %T", predicate.Value)
+		}
+
+		min = block.FloatMin[loc.Index]
+		max = block.FloatMax[loc.Index]
+	default:
+		return false, nil
+	}
+
+	switch predicate.Op {
+	case "==":
+		return target < min || target > max, nil
+	case "!=":
+		return min == target && max == target, nil
+	case ">":
+		return max <= target, nil
+	case ">=":
+		return max < target, nil
+	case "<":
+		return min >= target, nil
+	case "<=":
+		return min > target, nil
+	default:
+		return false, nil
+	}
 
 }
 
